@@ -1,0 +1,23 @@
+[package]
+name = "hdrhistogram"
+version = "0.1.0"
+authors = [ "Soeren Roerden <soeren@roerden.de>" ]
+license = "MIT"
+readme = "README.md"
+keywords = ["stats", "profiling", "metrics"]
+description = "A Rust port of HdrHistogram"
+repository = "https://github.org/soro/rusty-hdrhistogram.git"
+categories = ["data-structures"]
+
+[dependencies]
+num-traits = "0.1"
+parking_lot = "0.5"
+bytes = "0.4"
+byteorder = "1.0.0"
+miniz_oxide = "0.1.1"
+base64 = "0.8.0"
+lazycell = "0.6"
+
+[dev-dependencies]
+rand = "0.3"
+#criterion = { git = "https://github.com/japaric/criterion.rs.git" }
