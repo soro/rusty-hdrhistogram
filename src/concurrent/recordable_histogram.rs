@@ -1,7 +1,6 @@
-use core::*;
+use crate::core::*;
 
-pub trait RecordableHistogram
-    : ReadableHistogram + MutSliceableHistogram<u64> + Sized {
+pub trait RecordableHistogram: ReadableHistogram + Sized {
     fn fresh(settings: &HistogramSettings) -> Result<Self, CreationError>;
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData;
     unsafe fn clear_counts(&self);

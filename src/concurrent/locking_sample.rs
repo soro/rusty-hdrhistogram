@@ -1,7 +1,7 @@
-use concurrent::recordable_histogram::RecordableHistogram;
-use concurrent::recorder::Recorder;
-use concurrent::snapshot::Snapshot;
-use concurrent::writer_reader_phaser::PhaseFlipGuard;
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::concurrent::recorder::Recorder;
+use crate::concurrent::snapshot::Snapshot;
+use crate::concurrent::writer_reader_phaser::PhaseFlipGuard;
 use std::mem;
 use std::sync::atomic::{AtomicPtr, Ordering};
 

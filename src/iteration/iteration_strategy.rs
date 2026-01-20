@@ -1,5 +1,5 @@
-use core::ReadableHistogram;
-use iteration::*;
+use crate::core::ReadableHistogram;
+use crate::iteration::*;
 
 pub trait IterationStrategy<T: ReadableHistogram>: Sized {
     fn reached_iteration_level(&mut self, &IterationState, &T) -> bool;

@@ -1,9 +1,9 @@
-use concurrent::locking_sample::LockingSample;
-use concurrent::recordable_histogram::RecordableHistogram;
-use concurrent::resizable_histogram::ResizableHistogram;
-use concurrent::static_histogram::StaticHistogram;
-use concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
-use core::*;
+use crate::concurrent::locking_sample::LockingSample;
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::concurrent::resizable_histogram::ResizableHistogram;
+use crate::concurrent::static_histogram::StaticHistogram;
+use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
+use crate::core::*;
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -18,15 +18,15 @@ pub struct Recorder<T: RecordableHistogram> {
     active_histogram: AtomicPtr<T>,
 }
 
-pub type StaticRecorder = Recorder<StaticHistogram>;
+pub type StaticRecorder<const N: usize> = Recorder<StaticHistogram<N>>;
 pub type ResizableRecorder = Recorder<ResizableHistogram>;
 
-pub fn static_with_low_high_sigvdig(
+pub fn static_with_low_high_sigvdig<const N: usize>(
     lowest_discernible_value: u64,
     highest_trackable_value: u64,
     significant_value_digits: u8,
-) -> Result<StaticRecorder, CreationError> {
-    StaticHistogram::with_low_high_sigvdig(
+) -> Result<StaticRecorder<N>, CreationError> {
+    StaticHistogram::<N>::with_low_high_sigvdig(
         lowest_discernible_value,
         highest_trackable_value,
         significant_value_digits,

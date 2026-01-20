@@ -1,4 +1,4 @@
-use st::Histogram;
+use crate::st::Histogram;
 
 macro_rules! succ {
     ($e:expr) => {

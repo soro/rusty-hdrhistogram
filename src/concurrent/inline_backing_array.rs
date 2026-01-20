@@ -1,58 +1,58 @@
-use core::util::mem_util::alloc_guard;
-use std::fmt::Debug;
-use std::heap::{self, Alloc, Layout};
-use std::mem;
+use std::alloc::{alloc_zeroed, dealloc, handle_alloc_error, Layout};
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 #[repr(C)]
-pub struct InlineBackingArray<T, A: Alloc = heap::Heap> {
+pub(crate) struct InlineBackingArray<T> {
     length: u32,
-    allocator: A,
-    array: T,
+    normalizing_index_offset: AtomicI32,
+    _marker: PhantomData<T>,
 }
 
-impl<T: Debug, A: Alloc> InlineBackingArray<T, A> {
-    fn get_size_and_layout(length: u32) -> (usize, Layout) {
-        let t_size = mem::size_of::<T>();
-        let array_size = if length == 0 {
-            0
-        } else {
-            t_size * (length - 1).max(0) as usize
-        };
-        let size = mem::size_of::<InlineBackingArray<T, A>>() + array_size;
-
-        unsafe {
-            (
-                size,
-                Layout::from_size_align_unchecked(size, mem::align_of::<InlineBackingArray<T, A>>()),
-            )
-        }
+impl<T> InlineBackingArray<T> {
+    fn layout(length: u32) -> (Layout, usize) {
+        let header = Layout::new::<InlineBackingArray<T>>();
+        let array = Layout::array::<T>(length as usize).expect("capacity overflow");
+        let (layout, offset) = header.extend(array).expect("capacity overflow");
+        (layout.pad_to_align(), offset)
     }
 
-    pub unsafe fn new_in(length: u32, mut allocator: A) -> *mut InlineBackingArray<T, A> {
-        let (size, layout) = InlineBackingArray::<T, A>::get_size_and_layout(length);
-
-        alloc_guard(size);
-
-        let res_ptr = match allocator.alloc_zeroed(layout) {
-            Ok(ptr) => ptr as *mut InlineBackingArray<T, A>,
-            Err(err) => allocator.oom(err),
-        };
-
+    /// # Safety
+    /// `T` must be valid when zero-initialized and must not require drop.
+    pub(crate) unsafe fn new(length: u32) -> *mut InlineBackingArray<T> {
+        let (layout, _) = InlineBackingArray::<T>::layout(length);
+        let ptr = alloc_zeroed(layout);
+        if ptr.is_null() {
+            handle_alloc_error(layout);
+        }
+        let res_ptr = ptr as *mut InlineBackingArray<T>;
         (*res_ptr).length = length;
-
+        (*res_ptr).normalizing_index_offset = AtomicI32::new(0);
         res_ptr
     }
 
-    pub unsafe fn get_array_ptr(&self) -> *mut T {
-        &self.array as *const T as *mut T
+    pub(crate) unsafe fn get_array_ptr(&self) -> *mut T {
+        let (_, offset) = InlineBackingArray::<T>::layout(self.length);
+        (self as *const InlineBackingArray<T> as *const u8)
+            .add(offset) as *mut T
     }
 
-    pub fn length(&self) -> u32 {
+    pub(crate) fn length(&self) -> u32 {
         self.length
     }
 
     #[inline(always)]
-    pub fn get(&self, index: u32) -> Option<&T> {
+    pub(crate) fn normalizing_index_offset(&self) -> i32 {
+        self.normalizing_index_offset.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_normalizing_index_offset(&self, offset: i32) {
+        self.normalizing_index_offset.store(offset, Ordering::Relaxed);
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(&self, index: u32) -> Option<&T> {
         if index < self.length {
             return unsafe { Some(self.get_unchecked(index)) };
         }
@@ -60,14 +60,12 @@ impl<T: Debug, A: Alloc> InlineBackingArray<T, A> {
     }
 
     #[inline(always)]
-    pub unsafe fn get_unchecked(&self, index: u32) -> &T {
-        let loc = (&self.array as *const T).offset(index as isize);
-        &*loc
+    pub(crate) unsafe fn get_unchecked(&self, index: u32) -> &T {
+        &*self.get_array_ptr().add(index as usize)
     }
 
-    pub fn dealloc(&mut self) {
-        let (_, layout) = InlineBackingArray::<T, A>::get_size_and_layout(self.length);
-        let ptr: *mut u8 = unsafe { mem::transmute(&mut *self) };
-        unsafe { self.allocator.dealloc(ptr, layout) };
+    pub(crate) fn dealloc(&mut self) {
+        let (layout, _) = InlineBackingArray::<T>::layout(self.length);
+        unsafe { dealloc(self as *mut InlineBackingArray<T> as *mut u8, layout) };
     }
 }

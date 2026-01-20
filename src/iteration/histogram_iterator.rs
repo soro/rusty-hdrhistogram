@@ -1,5 +1,5 @@
-use core::{HistogramSettings, ReadableHistogram};
-use iteration::*;
+use crate::core::{HistogramSettings, ReadableHistogram};
+use crate::iteration::*;
 
 pub struct HistogramIterator<'a, T: 'a, S> {
     pub(in iteration) histogram: &'a T,

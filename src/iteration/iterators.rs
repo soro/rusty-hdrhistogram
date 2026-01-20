@@ -1,7 +1,7 @@
-use core::ReadableHistogram;
-use iteration::*;
-use iteration::histogram_iterator::HistogramIterator;
-use iteration::iteration_strategy::*;
+use crate::core::ReadableHistogram;
+use crate::iteration::*;
+use crate::iteration::histogram_iterator::HistogramIterator;
+use crate::iteration::iteration_strategy::*;
 
 /// Newtype wrappers for HistogramIterator with concrete strategies
 

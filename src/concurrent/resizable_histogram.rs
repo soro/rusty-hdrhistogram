@@ -1,9 +1,10 @@
-use concurrent::{concurrent_util, Snapshot, WriterReaderPhaser};
-use concurrent::inline_backing_array::InlineBackingArray;
-use concurrent::recordable_histogram::RecordableHistogram;
-use core::*;
-use core::constants::*;
-use std::{heap, mem, ptr, slice};
+use crate::concurrent::{concurrent_util, Snapshot, WriterReaderPhaser};
+use crate::concurrent::inline_backing_array::InlineBackingArray;
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::core::*;
+use crate::core::constants::*;
+use crate::iteration::RecordedValuesIterator;
+use std::{mem, ptr};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicPtr, AtomicU64};
 use std::sync::atomic::Ordering;
@@ -55,8 +56,8 @@ impl ResizableHistogram {
         )?;
         settings.auto_resize = true;
         unsafe {
-            let active_array_ptr = InlineBackingArray::new_in(settings.counts_array_length, heap::Heap);
-            let inactive_array_ptr = InlineBackingArray::new_in(settings.counts_array_length, heap::Heap);
+            let active_array_ptr = InlineBackingArray::new(settings.counts_array_length);
+            let inactive_array_ptr = InlineBackingArray::new(settings.counts_array_length);
             Ok(ResizableHistogram {
                 meta_data: HistogramMetaData::new(),
                 wrp: WriterReaderPhaser::new(),
@@ -85,6 +86,31 @@ impl ResizableHistogram {
     }
 
     #[inline(always)]
+    pub(crate) fn record_value_with_count_strict(&self, value: u64, count: u64) -> Result<(), RecordError> {
+        unsafe {
+            let settings = &*self.settings.get();
+            let idx = settings.counts_array_index(value);
+            if idx >= settings.counts_array_length {
+                return Err(RecordError::ValueOutOfRangeResizeDisabled);
+            }
+            {
+                let _csg = self.wrp.begin_writer_critical_section();
+                let active_counts = &*self.active_counts.load(Ordering::Relaxed);
+                let normalized_index = util::normalize_index(
+                    idx,
+                    active_counts.normalizing_index_offset(),
+                    active_counts.length(),
+                );
+                let c = active_counts.get_unchecked(normalized_index);
+                c.fetch_add(count, Ordering::Relaxed);
+            }
+            self.update_min_and_max(value);
+            self.total_count.fetch_add(count, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[inline(always)]
     fn record_count_at_value(&self, count: u64, value: u64) -> Result<(), RecordError> {
         unsafe {
             let idx = (*self.settings.get()).counts_array_index(value);
@@ -93,14 +119,33 @@ impl ResizableHistogram {
                 {
                     let _csg = self.wrp.begin_writer_critical_section();
                     let active_counts = &*self.active_counts.load(Ordering::Relaxed);
-                    let c = active_counts.get_unchecked(idx);
+                    let normalized_index = util::normalize_index(
+                        idx,
+                        active_counts.normalizing_index_offset(),
+                        active_counts.length(),
+                    );
+                    let c = active_counts.get_unchecked(normalized_index);
                     c.fetch_add(count, Ordering::Relaxed);
                 }
                 self.update_min_and_max(value);
                 self.total_count.fetch_add(count, Ordering::Relaxed);
                 Ok(())
             } else if !self.is_auto_resize() {
-                Err(RecordError::ValueOutOfRangeResizeDisabled)
+                {
+                    let _csg = self.wrp.begin_writer_critical_section();
+                    let active_counts = &*self.active_counts.load(Ordering::Relaxed);
+                    let last_idx = (*self.settings.get()).counts_array_length - 1;
+                    let normalized_index = util::normalize_index(
+                        last_idx,
+                        active_counts.normalizing_index_offset(),
+                        active_counts.length(),
+                    );
+                    let c = active_counts.get_unchecked(normalized_index);
+                    c.fetch_add(count, Ordering::Relaxed);
+                }
+                self.update_min_and_max(value);
+                self.total_count.fetch_add(count, Ordering::Relaxed);
+                Ok(())
             } else {
                 self.resize_and_record(value, idx, count)
             }
@@ -115,8 +160,13 @@ impl ResizableHistogram {
                     {
                         let _csg = self.wrp.begin_writer_critical_section();
                         let active_counts = &*self.active_counts.load(Ordering::Relaxed);
+                        let normalized_index = util::normalize_index(
+                            idx,
+                            active_counts.normalizing_index_offset(),
+                            active_counts.length(),
+                        );
                         active_counts
-                            .get_unchecked(idx)
+                            .get_unchecked(normalized_index)
                             .fetch_add(count, Ordering::Relaxed); // should probably be consume for arm?
                     }
 
@@ -146,6 +196,170 @@ impl ResizableHistogram {
         concurrent_util::update_min_non_zero_value(&self.settings, &self.raw_min_non_zero_value, value);
     }
 
+    pub(crate) fn shift_values_left(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.get_total_count() == self.unsafe_get_count_at_index(0) {
+            return Ok(());
+        }
+
+        let shift_amount = number_of_binary_orders_of_magnitude << self.settings().sub_bucket_half_count_magnitude;
+        let max_value_index = self.settings().counts_array_index(self.get_max_value());
+        if max_value_index >= (self.counts_array_length() - shift_amount) {
+            return Err(ShiftError::Overflow);
+        }
+
+        let max_before = self.raw_max_value.swap(ORIGINAL_MAX, Ordering::Relaxed);
+        let min_before = self.raw_min_non_zero_value.swap(ORIGINAL_MIN, Ordering::Relaxed);
+        let lowest_half_bucket_populated =
+            min_before < ((self.settings().sub_bucket_half_count as u64) << self.settings().unit_magnitude);
+
+        self.shift_normalizing_index_by_offset(shift_amount as i32, lowest_half_bucket_populated)?;
+
+        self.update_min_and_max(max_before << number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before << number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shift_values_right(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.get_total_count() == self.unsafe_get_count_at_index(0) {
+            return Ok(());
+        }
+
+        let shift_amount = self.settings().sub_bucket_half_count * number_of_binary_orders_of_magnitude;
+        let min_non_zero_value_index = self.settings().counts_array_index(self.get_min_non_zero_value());
+        if min_non_zero_value_index < shift_amount + self.settings().sub_bucket_half_count {
+            return Err(ShiftError::Underflow);
+        }
+
+        let max_before = self.raw_max_value.swap(ORIGINAL_MAX, Ordering::Relaxed);
+        let min_before = self.raw_min_non_zero_value.swap(ORIGINAL_MIN, Ordering::Relaxed);
+
+        self.shift_normalizing_index_by_offset(-(shift_amount as i32), false)?;
+
+        self.update_min_and_max(max_before >> number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before >> number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    fn shift_normalizing_index_by_offset(
+        &self,
+        offset_to_add: i32,
+        lowest_half_bucket_populated: bool,
+    ) -> Result<(), ShiftError> {
+        let flip_guard = self.wrp.reader_lock();
+        let active_counts = unsafe { &*self.active_counts.load(Ordering::Relaxed) };
+        let inactive_counts = unsafe { &*self.inactive_counts.load(Ordering::Relaxed) };
+
+        let new_offset = active_counts.normalizing_index_offset() + offset_to_add;
+        if new_offset == active_counts.normalizing_index_offset() {
+            return Ok(());
+        }
+
+        self.set_normalizing_index_offset_for_inactive(
+            inactive_counts,
+            new_offset,
+            offset_to_add,
+            lowest_half_bucket_populated,
+        )?;
+
+        self.swap_active_inactive();
+        flip_guard.flip();
+
+        let inactive_counts = unsafe { &*self.inactive_counts.load(Ordering::Relaxed) };
+        self.set_normalizing_index_offset_for_inactive(
+            inactive_counts,
+            new_offset,
+            offset_to_add,
+            lowest_half_bucket_populated,
+        )?;
+
+        self.swap_active_inactive();
+        flip_guard.flip();
+
+        Ok(())
+    }
+
+    fn set_normalizing_index_offset_for_inactive(
+        &self,
+        inactive_counts: &InlineBackingArray<AtomicU64>,
+        new_normalizing_index_offset: i32,
+        shifted_amount: i32,
+        lowest_half_bucket_populated: bool,
+    ) -> Result<(), ShiftError> {
+        let pre_shift_zero_index = util::normalize_index(
+            0,
+            inactive_counts.normalizing_index_offset(),
+            inactive_counts.length(),
+        );
+        let zero_value_count = inactive_counts
+            .get_unchecked(pre_shift_zero_index)
+            .load(Ordering::Relaxed);
+        inactive_counts
+            .get_unchecked(pre_shift_zero_index)
+            .store(0, Ordering::Relaxed);
+
+        inactive_counts.set_normalizing_index_offset(new_normalizing_index_offset);
+
+        if shifted_amount > 0 && lowest_half_bucket_populated {
+            self.shift_lowest_inactive_half_bucket_contents_left(
+                inactive_counts,
+                shifted_amount as u32,
+                pre_shift_zero_index,
+            );
+        } else if lowest_half_bucket_populated && shifted_amount <= 0 {
+            return Err(ShiftError::Underflow);
+        }
+
+        let new_zero_index = util::normalize_index(
+            0,
+            inactive_counts.normalizing_index_offset(),
+            inactive_counts.length(),
+        );
+        inactive_counts
+            .get_unchecked(new_zero_index)
+            .store(zero_value_count, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    fn shift_lowest_inactive_half_bucket_contents_left(
+        &self,
+        inactive_counts: &InlineBackingArray<AtomicU64>,
+        shift_amount: u32,
+        pre_shift_zero_index: u32,
+    ) {
+        let number_of_binary_orders_of_magnitude =
+            shift_amount >> self.settings().sub_bucket_half_count_magnitude;
+        for from_index in 1..self.settings().sub_bucket_half_count {
+            let to_value = self.settings().value_from_index(from_index) << number_of_binary_orders_of_magnitude;
+            let to_index = self.settings().counts_array_index(to_value);
+            let normalized_to_index = util::normalize_index(
+                to_index,
+                inactive_counts.normalizing_index_offset(),
+                inactive_counts.length(),
+            );
+            let from_normalized_index = from_index + pre_shift_zero_index;
+            let count_at_from_index = inactive_counts
+                .get_unchecked(from_normalized_index)
+                .load(Ordering::Relaxed);
+            inactive_counts
+                .get_unchecked(normalized_to_index)
+                .store(count_at_from_index, Ordering::Relaxed);
+            inactive_counts
+                .get_unchecked(from_normalized_index)
+                .store(0, Ordering::Relaxed);
+        }
+    }
+
     pub fn is_auto_resize(&self) -> bool {
         unsafe { (*self.settings.get()).auto_resize }
     }
@@ -166,8 +380,19 @@ impl ResizableHistogram {
         unsafe {
             let active_counts = &*self.active_counts.load(Ordering::Acquire);
 
-            let active_count = active_counts.get_unchecked(index);
-            let inactive_count = (*self.inactive_counts.load(Ordering::Relaxed)).get_unchecked(index);
+            let active_index = util::normalize_index(
+                index,
+                active_counts.normalizing_index_offset(),
+                active_counts.length(),
+            );
+            let inactive_counts = &*self.inactive_counts.load(Ordering::Relaxed);
+            let inactive_index = util::normalize_index(
+                index,
+                inactive_counts.normalizing_index_offset(),
+                inactive_counts.length(),
+            );
+            let active_count = active_counts.get_unchecked(active_index);
+            let inactive_count = inactive_counts.get_unchecked(inactive_index);
             active_count.load(Ordering::Relaxed) + inactive_count.load(Ordering::Relaxed)
         }
     }
@@ -184,12 +409,61 @@ impl ResizableHistogram {
             .get_min_non_zero_value(self.raw_min_non_zero_value.load(Ordering::Relaxed))
     }
 
+    pub(crate) fn set_integer_to_double_value_conversion_ratio(&self, ratio: f64) {
+        let _lg = self.wrp.reader_lock();
+        unsafe {
+            let settings = &mut *self.settings.get();
+            settings.integer_to_double_value_conversion_ratio = ratio;
+            settings.double_to_integer_value_conversion_ratio = 1.0 / ratio;
+        }
+    }
+
     unsafe fn copy_counts(&self, source: &InlineBackingArray<AtomicU64>, target: &mut InlineBackingArray<AtomicU64>) {
         ptr::copy_nonoverlapping(
             source.get_array_ptr(),
             (*target).get_array_ptr(),
             self.counts_array_length() as usize,
         );
+        target.set_normalizing_index_offset(source.normalizing_index_offset());
+    }
+
+    unsafe fn copy_inactive_counts_contents_on_resize(
+        &self,
+        old_inactive: &InlineBackingArray<AtomicU64>,
+        new_inactive: &InlineBackingArray<AtomicU64>,
+        counts_delta: u32,
+    ) {
+        let old_zero_index = util::normalize_index(
+            0,
+            old_inactive.normalizing_index_offset(),
+            old_inactive.length(),
+        );
+        new_inactive.set_normalizing_index_offset(old_inactive.normalizing_index_offset());
+
+        if old_zero_index == 0 {
+            for i in 0..old_inactive.length() {
+                let value = old_inactive.get_unchecked(i).load(Ordering::Relaxed);
+                new_inactive.get_unchecked(i).store(value, Ordering::Relaxed);
+            }
+        } else {
+            for i in 0..old_zero_index {
+                let value = old_inactive.get_unchecked(i).load(Ordering::Relaxed);
+                new_inactive.get_unchecked(i).store(value, Ordering::Relaxed);
+            }
+            for i in old_zero_index..old_inactive.length() {
+                let value = old_inactive.get_unchecked(i).load(Ordering::Relaxed);
+                new_inactive
+                    .get_unchecked(i + counts_delta)
+                    .store(value, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn swap_active_inactive(&self) {
+        let active_ptr = self.active_counts.load(Ordering::Relaxed);
+        let inactive_ptr = self.inactive_counts.load(Ordering::Relaxed);
+        self.active_counts.store(inactive_ptr, Ordering::SeqCst);
+        self.inactive_counts.store(active_ptr, Ordering::SeqCst);
     }
 
     #[inline(never)]
@@ -206,40 +480,38 @@ impl ResizableHistogram {
             assert!(settings.counts_array_length == inactive_counts.length());
 
             let new_array_length = settings.determine_array_length_needed(new_highest_trackable_value);
-            // TODO: this should be a global length limit enforced throughout allocation etc
-            if new_array_length > i32::max_value() as u32 {
+            if new_array_length > i32::MAX as u32 {
                 return Err(CreationError::RequiresExcessiveArrayLen);
             }
 
-            let counts_delta = new_array_length as isize - settings.counts_array_length as isize;
-
-            if counts_delta <= 0 {
+            let counts_delta = new_array_length - settings.counts_array_length;
+            if counts_delta == 0 {
                 return Ok(());
             }
 
-            // TODO: all of normalization
-            let new_inactive_counts = InlineBackingArray::<AtomicU64>::new_in(new_array_length, heap::Heap);
+            let new_inactive_counts_1 = InlineBackingArray::<AtomicU64>::new(new_array_length);
+            let new_inactive_counts_2 = InlineBackingArray::<AtomicU64>::new(new_array_length);
+
             let previous_inactive_counts = self.inactive_counts.load(Ordering::Relaxed);
-            self.copy_counts(&*previous_inactive_counts, &mut *new_inactive_counts);
-            // TODO: add shifting stuff here - maybe already at copy into
+            self.inactive_counts.store(new_inactive_counts_1, Ordering::SeqCst);
+            self.copy_inactive_counts_contents_on_resize(
+                &*previous_inactive_counts,
+                &*new_inactive_counts_1,
+                counts_delta,
+            );
 
-            let previous_active_counts = self.active_counts
-                .swap(new_inactive_counts, Ordering::SeqCst);
-
+            self.swap_active_inactive();
             flip_guard.flip();
 
-            let resized_previous_active_counts = InlineBackingArray::<AtomicU64>::new_in(new_array_length, heap::Heap);
-            self.copy_counts(
+            let previous_active_counts = self.inactive_counts.load(Ordering::Relaxed);
+            self.inactive_counts.store(new_inactive_counts_2, Ordering::SeqCst);
+            self.copy_inactive_counts_contents_on_resize(
                 &*previous_active_counts,
-                &mut *resized_previous_active_counts,
+                &*new_inactive_counts_2,
+                counts_delta,
             );
-            // TODO: add shifting stuff here as well
 
-            let resized_inactive_counts = self.active_counts
-                .swap(resized_previous_active_counts, Ordering::SeqCst);
-            self.inactive_counts
-                .store(resized_inactive_counts, Ordering::SeqCst);
-
+            self.swap_active_inactive();
             flip_guard.flip();
 
             (*previous_active_counts).dealloc();
@@ -265,7 +537,8 @@ impl ResizableHistogram {
         let _lg = self.wrp.reader_lock();
         let active_counts = self.active_counts.load(Ordering::Relaxed);
         let inactive_counts = self.inactive_counts.load(Ordering::Relaxed);
-        for ix in 0..(*self.settings.get()).counts_array_length {
+        let settings = &*self.settings.get();
+        for ix in 0..settings.counts_array_length {
             (*active_counts)
                 .get_unchecked(ix)
                 .store(0, Ordering::Relaxed);
@@ -274,9 +547,15 @@ impl ResizableHistogram {
                 .store(0, Ordering::Relaxed);
         }
         self.total_count.store(0, Ordering::Relaxed);
+        self.raw_max_value
+            .store(ORIGINAL_MAX | settings.unit_magnitude_mask, Ordering::Relaxed);
+        self.raw_min_non_zero_value
+            .store(ORIGINAL_MIN, Ordering::Relaxed);
+        let meta_data = &self.meta_data as *const HistogramMetaData as *mut HistogramMetaData;
+        (*meta_data).clear();
     }
 
-    fn equals(&mut self, other: &mut Self) -> bool {
+    fn equals(&self, other: &Self) -> bool {
         if ptr::eq(self, other) {
             return true;
         }
@@ -289,18 +568,42 @@ impl ResizableHistogram {
             self.get_min_non_zero_value(),
             other.get_min_non_zero_value()
         );
-        let inactive_counts = self.inactive_counts.load(Ordering::Relaxed);
-        let other_inactive_counts = other.inactive_counts.load(Ordering::Relaxed);
-        for i in 0..self.counts_array_length() {
-            check_eq!(
-                self.unsafe_get_count_at_index(i),
-                other.unsafe_get_count_at_index(i)
-            );
-            unsafe {
+        let self_len = self.counts_array_length();
+        let other_len = other.counts_array_length();
+        if self_len == other_len {
+            let inactive_counts = unsafe { &*self.inactive_counts.load(Ordering::Relaxed) };
+            let other_inactive_counts = unsafe { &*other.inactive_counts.load(Ordering::Relaxed) };
+            for i in 0..self_len {
                 check_eq!(
-                    (*inactive_counts).get_unchecked(i).load(Ordering::Relaxed),
-                    (*other_inactive_counts).get_unchecked(i).load(Ordering::Relaxed)
-                )
+                    self.unsafe_get_count_at_index(i),
+                    other.unsafe_get_count_at_index(i)
+                );
+                let inactive_index = util::normalize_index(
+                    i,
+                    inactive_counts.normalizing_index_offset(),
+                    inactive_counts.length(),
+                );
+                let other_inactive_index = util::normalize_index(
+                    i,
+                    other_inactive_counts.normalizing_index_offset(),
+                    other_inactive_counts.length(),
+                );
+                check_eq!(
+                    inactive_counts.get_unchecked(inactive_index).load(Ordering::Relaxed),
+                    other_inactive_counts
+                        .get_unchecked(other_inactive_index)
+                        .load(Ordering::Relaxed)
+                );
+            }
+        } else {
+            let other_last = other_len - 1;
+            for value in RecordedValuesIterator::new(self) {
+                let mut other_index = other.settings().counts_array_index(value.value_iterated_to);
+                if other_index > other_last {
+                    other_index = other_last;
+                }
+                let other_count = other.unsafe_get_count_at_index(other_index);
+                check_eq!(value.count_at_value_iterated_to, other_count);
             }
         }
         return true;
@@ -311,9 +614,21 @@ impl ResizableHistogram {
         let active_counts = self.active_counts.load(Ordering::Relaxed);
         let inactive_counts = self.inactive_counts.load(Ordering::Relaxed);
         for idx in 0..self.settings().counts_array_length {
-            let inactive_loc = (*inactive_counts).get_unchecked(idx);
+            let active_index = util::normalize_index(
+                idx,
+                (*active_counts).normalizing_index_offset(),
+                (*active_counts).length(),
+            );
+            let inactive_index = util::normalize_index(
+                idx,
+                (*inactive_counts).normalizing_index_offset(),
+                (*inactive_counts).length(),
+            );
+            let inactive_loc = (*inactive_counts).get_unchecked(inactive_index);
             let count = inactive_loc.load(Ordering::Relaxed);
-            (*active_counts).get_unchecked(idx).fetch_add(count, Ordering::Relaxed);
+            (*active_counts)
+                .get_unchecked(active_index)
+                .fetch_add(count, Ordering::Relaxed);
             inactive_loc.store(0, Ordering::Relaxed);
         }
     }}
@@ -343,7 +658,7 @@ impl ConstructableHistogram for ResizableHistogram {
             Ordering::Relaxed,
         );
         self.raw_min_non_zero_value.store(
-            ORIGINAL_MIN & !self.settings().unit_magnitude_mask,
+            ORIGINAL_MIN,
             Ordering::Relaxed,
         );
         let array_length = self.counts_array_length();
@@ -387,19 +702,6 @@ impl RecordableHistogram for ResizableHistogram {
     fn record_value_with_count(&self, value: u64, count: u64) -> Result<(), RecordError> {
         ResizableHistogram::record_value_with_count(self, value, count)
     }
-}
-
-impl MutSliceableHistogram<u64> for ResizableHistogram {
-    fn get_counts_slice_mut<'b>(&'b mut self, length: u32) -> Option<&'b mut [u64]> { unsafe {
-        if length > self.settings().counts_array_length { return None; }
-        else {
-            let active_counts = self.active_counts.load(Ordering::Relaxed);
-            if self.get_total_count() != 0 {
-                self.write_inactive_to_active();
-            }
-            return Some(slice::from_raw_parts_mut(mem::transmute((*active_counts).get_array_ptr()), length as usize));
-        }
-    }}
 }
 
 impl ReadableHistogram for ResizableHistogram {

@@ -4,21 +4,11 @@ Port of HdrHistogram to Rust.
 
 This port aims to be feature complete but is still missing
 an implementation of the log reader and the double histogram
-versions. Unfortunately I have had very little time in the last
-few months and it might still be a few weeks before these missing
-features are implemented.
+versions. Logging and serialization are temporarily removed
+as part of the modernization work.
 
 The concurrent histograms and recorder are somewhat feature complete
 and will probably work for your needs.
-A log writer is implemented but the corresponding reader is 
-not done yet. I'm not entirely sure I like the log format anyway 
-and I assume you'd be building your own for your particular needs.
-
-So far I've only made sure that the single threaded histogram is
-very reliably fast, but since the key to achieving this was mostly
-to make sure that the right things are `#[inline(never)]`,  
-the concurrent version should be pretty reasonable as well.
-A value recording takes about (3.1 +/- 0.4)ns to complete.
 
 Note that this uses a bunch of unstable features. If you need a 
 version that uses only stable features or don't need a recorder, 
@@ -31,20 +21,20 @@ and use that instead.
 ### Single threaded version
 
 The single threaded version of the histogram can be found in the st
-submodule. I recommend reading the tests in `tests/histogram.rs` as
+submodule. Please read the tests in `tests/histogram.rs` as
 further documentation.
 
 ### Concurrent version
 
-I recommend not using the concurrent histograms directly but using
+You probably don't want to use the concurrent histograms directly but use
 a recorder instead.
 
-Currently, there are only two constructors
+There are currently two constructors
 
 ```rust
 use hdrhistogram_rust::concurrent::recorder;
 recorder::resizable_with_low_high_sigvdig
-recorder::static_with_low_high_sigvdig
+recorder::static_with_low_high_sigvdig::<COUNTS_ARRAY_LENGTH>
 ```
 
 which produce recorders that use an underlying
@@ -65,9 +55,9 @@ consumer that logs the snapshots on a periodic basis.
 
 An unsafe method allowing concurrent sampling will follow.
 
-### Iteration and serialization
+### Iteration
 
 Both the single threaded histogram as well as any 
-`Snapshot<T>` of a concurrent histogram are iterable and serializable.
+`Snapshot<T>` of a concurrent histogram are iterable.
 I recommend reading the tests in `tests/iteration.rs` and 
-`tests/serialization.rs` for further details.
+`tests/histogram.rs` for further details.

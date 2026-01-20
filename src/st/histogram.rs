@@ -1,9 +1,9 @@
-use core::*;
-use st::backing_array::BackingArray;
-use core::constants::*;
-use core::counter::Counter;
-use core::meta_data::HistogramMetaData;
-use iteration::*;
+use crate::core::*;
+use crate::st::backing_array::BackingArray;
+use crate::core::constants::*;
+use crate::core::counter::Counter;
+use crate::core::meta_data::HistogramMetaData;
+use crate::iteration::*;
 use std;
 use std::borrow::Borrow;
 
@@ -14,6 +14,7 @@ pub struct Histogram<T> {
     raw_max_value: u64,
     raw_min_non_zero_value: u64,
     total_count: u64,
+    normalizing_index_offset: i32,
     counts: BackingArray<T>,
 }
 
@@ -24,11 +25,16 @@ impl<T: Counter> Histogram<T> {
     }
 
     pub fn get_count_at_index(&self, index: u32) -> Option<&T> {
-        self.counts.get(index)
+        if index >= self.counts_array_length() {
+            return None;
+        }
+        let normalized_index = self.normalize_index(index);
+        Some(self.counts.get_unchecked(normalized_index))
     }
 
     pub(crate) fn unsafe_get_count_at_index(&self, index: u32) -> &T {
-        self.counts.get_unchecked(index)
+        let normalized_index = self.normalize_index(index);
+        self.counts.get_unchecked(normalized_index)
     }
 
     pub fn get_total_count(&self) -> u64 {
@@ -37,6 +43,16 @@ impl<T: Counter> Histogram<T> {
 
     pub fn counts_array_length(&self) -> u32 {
         self.counts.length()
+    }
+
+    #[inline(always)]
+    fn normalize_index(&self, index: u32) -> u32 {
+        util::normalize_index(index, self.normalizing_index_offset, self.counts_array_length())
+    }
+
+    #[inline(always)]
+    fn unsafe_get_count_at_normalized_index(&self, index: u32) -> &T {
+        self.counts.get_unchecked(index)
     }
 
     #[inline(always)]
@@ -49,7 +65,7 @@ impl<T: Counter> Histogram<T> {
     }
 
     pub fn hash_code(&self) -> i64 {
-        use core::util::hashing::*;
+        use crate::core::util::hashing::*;
         let mut h = 0_i64;
         add_mix32(&mut h, self.settings.unit_magnitude);
         add_mix32(&mut h, self.settings.number_of_significant_value_digits);
@@ -78,9 +94,25 @@ impl<T: Counter> Histogram<T> {
         if self.get_min_non_zero_value() != other.get_min_non_zero_value() {
             return false;
         }
-        for i in 0..self.counts_array_length() {
-            if self.unsafe_get_count_at_index(i) != other.unsafe_get_count_at_index(i) {
-                return false;
+        let self_len = self.counts_array_length();
+        let other_len = other.counts_array_length();
+        if self_len == other_len {
+            for i in 0..self_len {
+                if self.unsafe_get_count_at_index(i) != other.unsafe_get_count_at_index(i) {
+                    return false;
+                }
+            }
+        } else {
+            let other_last = other_len - 1;
+            for value in RecordedValuesIterator::new(self) {
+                let mut other_index = other.counts_array_index(value.value_iterated_to);
+                if other_index > other_last {
+                    other_index = other_last;
+                }
+                let other_count = *other.unsafe_get_count_at_index(other_index);
+                if value.count_at_value_iterated_to != other_count.as_u64() {
+                    return false;
+                }
             }
         }
         return true;
@@ -177,6 +209,19 @@ impl<T: Counter> Histogram<T> {
     pub fn get_number_of_significant_value_digits(&self) -> u32 {
         self.settings.number_of_significant_value_digits
     }
+    pub(crate) fn integer_to_double_value_conversion_ratio(&self) -> f64 {
+        self.settings.integer_to_double_value_conversion_ratio
+    }
+    pub(crate) fn double_to_integer_value_conversion_ratio(&self) -> f64 {
+        self.settings.double_to_integer_value_conversion_ratio
+    }
+    pub(crate) fn set_integer_to_double_value_conversion_ratio(&mut self, ratio: f64) {
+        self.settings.integer_to_double_value_conversion_ratio = ratio;
+        self.settings.double_to_integer_value_conversion_ratio = 1.0 / ratio;
+    }
+    pub(crate) fn lowest_tracking_integer_value(&self) -> u64 {
+        self.settings.sub_bucket_half_count as u64
+    }
     pub fn lowest_equivalent_value(&self, value: u64) -> u64 {
         self.settings.lowest_equivalent_value(value)
     }
@@ -228,12 +273,25 @@ impl<T: Counter> Histogram<T> {
             raw_max_value: ORIGINAL_MAX,
             raw_min_non_zero_value: ORIGINAL_MIN,
             total_count: 0,
-            counts: BackingArray::new(counts_array_length, std::heap::Heap),
+            normalizing_index_offset: 0,
+            counts: BackingArray::new(counts_array_length),
         })
     }
 
     fn add_to_count_at_index(&mut self, idx: u32, count: T) {
-        *self.counts.get_unchecked_mut(idx) += count;
+        let normalized_index = self.normalize_index(idx);
+        *self.counts.get_unchecked_mut(normalized_index) += count;
+    }
+
+    #[inline(always)]
+    fn set_count_at_index(&mut self, idx: u32, count: T) {
+        let normalized_index = self.normalize_index(idx);
+        *self.counts.get_unchecked_mut(normalized_index) = count;
+    }
+
+    #[inline(always)]
+    fn set_count_at_normalized_index(&mut self, idx: u32, count: T) {
+        *self.counts.get_unchecked_mut(idx) = count;
     }
 
     fn update_max_value(&mut self, value: u64) {
@@ -260,7 +318,7 @@ impl<T: Counter> Histogram<T> {
 
     fn reset_min_non_zero_value(&mut self, min_non_zero_value: u64) {
         let internal_value = min_non_zero_value & !self.settings.unit_magnitude_mask;
-        self.raw_min_non_zero_value = if min_non_zero_value == u64::max_value() {
+        self.raw_min_non_zero_value = if min_non_zero_value == u64::MAX {
             min_non_zero_value
         } else {
             internal_value
@@ -273,6 +331,99 @@ impl<T: Counter> Histogram<T> {
         }
         if value < self.raw_min_non_zero_value {
             self.update_min_non_zero_value(value)
+        }
+    }
+
+    pub(crate) fn shift_values_left(&mut self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.total_count == self.unsafe_get_count_at_index(0).as_u64() {
+            return Ok(());
+        }
+
+        let shift_amount = number_of_binary_orders_of_magnitude << self.settings.sub_bucket_half_count_magnitude;
+        let max_value_index = self.counts_array_index(self.get_max_value());
+        if max_value_index >= (self.counts_array_length() - shift_amount) {
+            return Err(ShiftError::Overflow);
+        }
+
+        let max_before = self.raw_max_value;
+        let min_before = self.raw_min_non_zero_value;
+        self.raw_max_value = ORIGINAL_MAX;
+        self.raw_min_non_zero_value = ORIGINAL_MIN;
+
+        let lowest_half_bucket_populated =
+            min_before < ((self.settings.sub_bucket_half_count as u64) << self.settings.unit_magnitude);
+        self.shift_normalizing_index_by_offset(shift_amount as i32, lowest_half_bucket_populated)?;
+
+        self.update_min_and_max(max_before << number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before << number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shift_values_right(&mut self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.total_count == self.unsafe_get_count_at_index(0).as_u64() {
+            return Ok(());
+        }
+
+        let shift_amount = self.settings.sub_bucket_half_count * number_of_binary_orders_of_magnitude;
+        let min_non_zero_value_index = self.counts_array_index(self.get_min_non_zero_value());
+        if min_non_zero_value_index < shift_amount + self.settings.sub_bucket_half_count {
+            return Err(ShiftError::Underflow);
+        }
+
+        let max_before = self.raw_max_value;
+        let min_before = self.raw_min_non_zero_value;
+        self.raw_max_value = ORIGINAL_MAX;
+        self.raw_min_non_zero_value = ORIGINAL_MIN;
+
+        self.shift_normalizing_index_by_offset(-(shift_amount as i32), false)?;
+
+        self.update_min_and_max(max_before >> number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before >> number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    fn shift_normalizing_index_by_offset(
+        &mut self,
+        offset_to_add: i32,
+        lowest_half_bucket_populated: bool,
+    ) -> Result<(), ShiftError> {
+        let zero_value_count = *self.unsafe_get_count_at_index(0);
+        self.set_count_at_index(0, T::zero());
+        let pre_shift_zero_index =
+            util::normalize_index(0, self.normalizing_index_offset, self.counts_array_length());
+
+        self.normalizing_index_offset += offset_to_add;
+
+        if lowest_half_bucket_populated {
+            if offset_to_add <= 0 {
+                return Err(ShiftError::Underflow);
+            }
+            self.shift_lowest_half_bucket_contents_left(offset_to_add as u32, pre_shift_zero_index);
+        }
+
+        self.set_count_at_index(0, zero_value_count);
+        Ok(())
+    }
+
+    fn shift_lowest_half_bucket_contents_left(&mut self, shift_amount: u32, pre_shift_zero_index: u32) {
+        let number_of_binary_orders_of_magnitude = shift_amount >> self.settings.sub_bucket_half_count_magnitude;
+        for from_index in 1..self.settings.sub_bucket_half_count {
+            let to_value = self.value_from_index(from_index) << number_of_binary_orders_of_magnitude;
+            let to_index = self.counts_array_index(to_value);
+            let from_normalized_index = from_index + pre_shift_zero_index;
+            let count_at_from_index = *self.unsafe_get_count_at_normalized_index(from_normalized_index);
+            self.set_count_at_index(to_index, count_at_from_index);
+            self.set_count_at_normalized_index(from_normalized_index, T::zero());
         }
     }
 
@@ -295,15 +446,16 @@ impl<T: Counter> Histogram<T> {
         let idx = self.settings.counts_array_index(value);
 
         if idx < self.counts.length() {
-            {
-                let c = self.counts.get_unchecked_mut(idx);
-                *c += count;
-            }
+            self.add_to_count_at_index(idx, count);
             self.update_min_and_max(value);
             self.total_count += count.as_u64();
             Ok(())
         } else if !self.is_auto_resize() {
-            Err(RecordError::ValueOutOfRangeResizeDisabled)
+            let last_idx = self.counts.length() - 1;
+            self.add_to_count_at_index(last_idx, count);
+            self.update_min_and_max(value);
+            self.total_count += count.as_u64();
+            Ok(())
         } else {
             self.resize_and_record(value, idx, count)
         }
@@ -353,7 +505,7 @@ impl<T: Counter> Histogram<T> {
 
         if self.settings
             .is_add_compatible_with(other_histogram.settings())
-        // TODO: add index offset!
+            && self.normalizing_index_offset == other_histogram.normalizing_index_offset
         {
             // Counts arrays are of the same length and meaning,
             // so we can just iterate and add directly:
@@ -411,7 +563,9 @@ impl<T: Counter> Histogram<T> {
                     return Err(SubtractionError::CountExceededAtValue);
                 }
                 let idx = self.settings.counts_array_index(other_value);
-                self.add_to_count_at_index(idx, other_count);
+                let normalized_index = self.normalize_index(idx);
+                let count = self.counts.get_unchecked_mut(normalized_index);
+                *count -= other_count;
             }
         }
 
@@ -441,20 +595,38 @@ impl<T: Counter> Histogram<T> {
         self.reset_max_value(ORIGINAL_MAX);
         self.reset_min_non_zero_value(ORIGINAL_MIN);
         self.total_count = 0;
+        self.normalizing_index_offset = 0;
         self.meta_data.clear();
     }
 
     #[inline(never)]
-    fn resize(&mut self, value: u64) -> Result<(), CreationError> {
+    pub fn resize(&mut self, value: u64) -> Result<(), CreationError> {
+        let old_length = self.counts_array_length();
         let new_length = self.settings.resize(value)?;
-        unsafe { Ok(self.counts.grow(new_length)) }
+        if new_length <= old_length {
+            return Ok(());
+        }
+        let counts_delta = new_length - old_length;
+        let old_zero_index = util::normalize_index(0, self.normalizing_index_offset, old_length);
+        self.counts.grow(new_length);
+        if old_zero_index != 0 {
+            for i in (old_zero_index..old_length).rev() {
+                let value = *self.counts.get_unchecked(i);
+                *self.counts.get_unchecked_mut(i + counts_delta) = value;
+            }
+            let new_zero_index = old_zero_index + counts_delta;
+            for i in old_zero_index..new_zero_index {
+                *self.counts.get_unchecked_mut(i) = T::zero();
+            }
+        }
+        Ok(())
     }
 
     #[inline(never)]
     fn resize_and_record(&mut self, value: u64, idx: u32, count: T) -> Result<(), RecordError> {
         self.resize(value)
             .map(|_| {
-                *self.counts.get_unchecked_mut(idx) += count;
+                self.add_to_count_at_index(idx, count);
 
                 self.update_min_and_max(value);
                 self.total_count += count.as_u64();
@@ -518,18 +690,6 @@ impl<T: Counter> ReadableHistogram for Histogram<T> {
     }
 
     fn meta_data(&self) -> &HistogramMetaData { &self.meta_data }
-}
-
-impl<T: Counter> ReadSliceableHistogram<T> for Histogram<T> {
-    fn get_counts_slice<'a>(&'a self, length: u32) -> Option<&'a [T]> {
-        Histogram::<T>::get_counts_slice(self, length)
-    }
-}
-
-impl<T: Counter> MutSliceableHistogram<T> for Histogram<T> {
-    fn get_counts_slice_mut<'a>(&'a mut self, length: u32) -> Option<&'a mut [T]> {
-        Histogram::<T>::get_counts_slice_mut(self, length)
-    }
 }
 
 impl<T: Counter> Histogram<T> {

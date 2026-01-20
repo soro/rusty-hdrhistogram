@@ -1,5 +1,5 @@
-use core::*;
-use core::constants::*;
+use crate::core::*;
+use crate::core::constants::*;
 
 #[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
@@ -36,7 +36,7 @@ impl HistogramSettings {
     ) -> Result<HistogramSettings, CreationError> {
         expect!(lowest_discernible_value < 1, CreationError::LowIsZero);
         expect!(
-            lowest_discernible_value > u64::max_value() / 2,
+            lowest_discernible_value > u64::MAX / 2,
             CreationError::LowGtMax
         );
         expect!(
@@ -89,7 +89,7 @@ impl HistogramSettings {
         let buckets_needed = s.get_buckets_needed_to_cover_value(highest_trackable_value);
 
         expect!(
-            buckets_needed > i32::max_value() as u32,
+            buckets_needed > i32::MAX as u32,
             CreationError::RequiresExcessiveArrayLen
         );
         s.bucket_count = buckets_needed;
@@ -113,8 +113,8 @@ impl HistogramSettings {
 
     #[inline(always)]
     pub fn highest_equivalent_value(&self, value: u64) -> u64 {
-        if value == u64::max_value() {
-            u64::max_value()
+        if value == u64::MAX {
+            u64::MAX
         } else {
             self.next_non_equivalent_value(value) - 1
         }
@@ -169,7 +169,7 @@ impl HistogramSettings {
 
         let mut buckets_needed = 1;
         while smallest_untrackable_value <= value {
-            if smallest_untrackable_value > u64::max_value() / 2 {
+            if smallest_untrackable_value > u64::MAX / 2 {
                 return buckets_needed + 1;
             }
             smallest_untrackable_value <<= 1;
@@ -211,7 +211,7 @@ impl HistogramSettings {
         let new_bucket_count = self.get_buckets_needed_to_cover_value(value);
         let new_length = self.get_length_for_number_of_buckets(new_bucket_count);
 
-        if new_length > i32::max_value() as u32 {
+        if new_length > i32::MAX as u32 {
             Err(CreationError::RequiresExcessiveArrayLen)
         } else {
             self.bucket_count = new_bucket_count;

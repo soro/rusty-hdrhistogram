@@ -1,10 +1,7 @@
-use concurrent::{StaticHistogram, ResizableHistogram};
-use concurrent::recordable_histogram::RecordableHistogram;
-use core::{HistogramMetaData, HistogramSettings, MutSliceableHistogram, ReadSliceableHistogram, ReadableHistogram};
-use iteration::*;
-use std::{mem, slice};
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::core::{HistogramMetaData, HistogramSettings, ReadableHistogram};
+use crate::iteration::*;
 use std::ops::Deref;
-use std::sync::atomic::Ordering;
 
 pub struct Snapshot<'a, T: 'a + RecordableHistogram>(&'a mut T);
 
@@ -39,41 +36,11 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
     pub fn recorded_values(&self) -> RecordedValuesIterator<T> {
         RecordedValuesIterator::new(self.0)
     }
-}
 
-impl<'a> ReadSliceableHistogram<u64> for Snapshot<'a, StaticHistogram> {
-    fn get_counts_slice<'b>(&'b self, length: u32) -> Option<&'b [u64]> {
-        unsafe {
-            let counts = self.counts.load(Ordering::Relaxed);
-            if length <= (*counts).length() {
-                return Some(slice::from_raw_parts(
-                    mem::transmute((*counts).get_array_ptr()),
-                    length as usize,
-                ));
-            }
-            None
-        }
-    }
-}
-
-impl<'a> ReadSliceableHistogram<u64> for Snapshot<'a, ResizableHistogram> {
-    fn get_counts_slice<'b>(&'b self, length: u32) -> Option<&'b [u64]> { unsafe {
-        if length > self.0.settings().counts_array_length { return None; }
-        else {
-            if self.0.get_total_count() != 0 {
-                self.0.write_inactive_to_active();
-            }
-            return Some(slice::from_raw_parts(
-                mem::transmute((*self.0.active_counts.load(Ordering::Relaxed)).get_array_ptr()),
-                length as usize,
-            ));
-        }
-    }}
-}
-
-impl<'a, T: RecordableHistogram> MutSliceableHistogram<u64> for Snapshot<'a, T> {
-    fn get_counts_slice_mut<'b>(&'b mut self, length: u32) -> Option<&'b mut [u64]> {
-        self.0.get_counts_slice_mut(length)
+    pub fn equals(&mut self, other: &mut Snapshot<'_, T>) -> bool {
+        let this = &mut *self.0;
+        let other = &mut *other.0;
+        this.equals(other)
     }
 }
 
@@ -94,12 +61,4 @@ impl<'a, T: RecordableHistogram> ReadableHistogram for Snapshot<'a, T> {
         self.0.get_max_value()
     }
     fn meta_data(&self) -> &HistogramMetaData { self.0.meta_data() }
-}
-
-impl<'a, T: RecordableHistogram> PartialEq for Snapshot<'a, T> {
-    fn eq(&self, other: &Self) -> bool {
-        // this is safe because we really only read from the values and use the &mut requirement to enforce exclusive access
-        #[allow(mutable_transmutes)]
-        unsafe { mem::transmute::<&T, &mut T>(self.0).equals(mem::transmute::<&T, &mut T>(other.0)) }
-    }
 }
