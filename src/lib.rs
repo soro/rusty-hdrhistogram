@@ -7,6 +7,7 @@
 mod core;
 pub mod concurrent;
 pub use crate::core::errors::*;
+pub mod encoding;
 pub mod st;
 pub mod iteration;
 

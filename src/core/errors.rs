@@ -19,6 +19,7 @@ pub enum SubtractionError {
 pub enum RecordError {
     ValueOutOfRangeResizeDisabled,
     ResizeFailed(CreationError),
+    DoubleCreationFailed(DoubleCreationError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -27,6 +28,12 @@ pub enum DoubleCreationError {
     HighestToLowestValueRatioTooLarge,
     SignificantValueDigitsExceedsMax,
     Internal(CreationError),
+}
+
+impl From<DoubleCreationError> for RecordError {
+    fn from(err: DoubleCreationError) -> Self {
+        RecordError::DoubleCreationFailed(err)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

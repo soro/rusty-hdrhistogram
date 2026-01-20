@@ -2,11 +2,11 @@ use crate::core::ReadableHistogram;
 use crate::iteration::*;
 
 pub trait IterationStrategy<T: ReadableHistogram>: Sized {
-    fn reached_iteration_level(&mut self, &IterationState, &T) -> bool;
+    fn reached_iteration_level(&mut self, state: &IterationState, histogram: &T) -> bool;
 
-    fn increment_iteration_level(&mut self, &IterationState, &T);
+    fn increment_iteration_level(&mut self, state: &IterationState, histogram: &T);
 
-    fn has_next(&mut self, state: &IterationState, &T) -> bool {
+    fn has_next(&mut self, state: &IterationState, _histogram: &T) -> bool {
         default_has_next(state)
     }
 
@@ -25,7 +25,7 @@ fn default_has_next(state: &IterationState) -> bool {
 }
 
 pub struct AllValuesStrategy {
-    pub(in iteration) visited_index: isize,
+    pub(in crate::iteration) visited_index: isize,
 }
 
 impl<T: ReadableHistogram> IterationStrategy<T> for AllValuesStrategy {
@@ -41,7 +41,7 @@ impl<T: ReadableHistogram> IterationStrategy<T> for AllValuesStrategy {
 }
 
 pub struct RecordedValuesStrategy {
-    pub(in iteration) visited_index: isize,
+    pub(in crate::iteration) visited_index: isize,
 }
 
 impl<T: ReadableHistogram> IterationStrategy<T> for RecordedValuesStrategy {
@@ -56,9 +56,9 @@ impl<T: ReadableHistogram> IterationStrategy<T> for RecordedValuesStrategy {
 }
 
 pub struct LinearStrategy {
-    pub(in iteration) value_units_per_bucket: u64,
-    pub(in iteration) current_step_highest_value_reporting_level: u64,
-    pub(in iteration) current_step_lowest_value_reporting_level: u64,
+    pub(in crate::iteration) value_units_per_bucket: u64,
+    pub(in crate::iteration) current_step_highest_value_reporting_level: u64,
+    pub(in crate::iteration) current_step_lowest_value_reporting_level: u64,
 }
 
 impl<T: ReadableHistogram> IterationStrategy<T> for LinearStrategy {
@@ -81,11 +81,11 @@ impl<T: ReadableHistogram> IterationStrategy<T> for LinearStrategy {
 }
 
 pub struct LogarithmicStrategy {
-    pub(in iteration) value_units_in_first_bucket: u64,
-    pub(in iteration) log_base: f64,
-    pub(in iteration) next_value_reporting_level: f64,
-    pub(in iteration) current_step_highest_value_reporting_level: u64,
-    pub(in iteration) current_step_lowest_value_reporting_level: u64,
+    pub(in crate::iteration) value_units_in_first_bucket: u64,
+    pub(in crate::iteration) log_base: f64,
+    pub(in crate::iteration) next_value_reporting_level: f64,
+    pub(in crate::iteration) current_step_highest_value_reporting_level: u64,
+    pub(in crate::iteration) current_step_lowest_value_reporting_level: u64,
 }
 
 impl<T: ReadableHistogram> IterationStrategy<T> for LogarithmicStrategy {
@@ -112,10 +112,10 @@ impl<T: ReadableHistogram> IterationStrategy<T> for LogarithmicStrategy {
 }
 
 pub struct PercentileStrategy {
-    pub(in iteration) percentile_ticks_per_half_distance: isize,
-    pub(in iteration) percentile_level_to_iterate_to: f64,
-    pub(in iteration) percentile_level_to_iterate_from: f64,
-    pub(in iteration) reached_last_recorded_value: bool,
+    pub(in crate::iteration) percentile_ticks_per_half_distance: isize,
+    pub(in crate::iteration) percentile_level_to_iterate_to: f64,
+    pub(in crate::iteration) percentile_level_to_iterate_from: f64,
+    pub(in crate::iteration) reached_last_recorded_value: bool,
 }
 
 impl<T: ReadableHistogram> IterationStrategy<T> for PercentileStrategy {
@@ -129,10 +129,24 @@ impl<T: ReadableHistogram> IterationStrategy<T> for PercentileStrategy {
 
     fn increment_iteration_level(&mut self, _: &IterationState, _: &T) {
         self.percentile_level_to_iterate_from = self.percentile_level_to_iterate_to;
-        let exp = (f64::ln(100.0 / (100.0 - self.percentile_level_to_iterate_to)) / f64::ln(2.0)) as i32 + 1;
-        let factor = f64::powi(2.0, exp) as isize;
-        let percentile_reporting_ticks = self.percentile_ticks_per_half_distance * factor;
-        self.percentile_level_to_iterate_to += 100.0 / percentile_reporting_ticks as f64;
+        let exp = (f64::ln(100.0 / (100.0 - self.percentile_level_to_iterate_to)) / f64::ln(2.0))
+            as i64;
+        let exp = exp.saturating_add(1);
+        let exp = if exp < 0 {
+            0_u32
+        } else if exp > 62 {
+            62_u32
+        } else {
+            exp as u32
+        };
+        let factor = 1_u64 << exp;
+        let ticks_per_half = self.percentile_ticks_per_half_distance as u64;
+        let percentile_reporting_ticks = ticks_per_half.saturating_mul(factor);
+        if percentile_reporting_ticks == 0 {
+            self.percentile_level_to_iterate_to = 100.0;
+        } else {
+            self.percentile_level_to_iterate_to += 100.0 / percentile_reporting_ticks as f64;
+        }
     }
 
     fn has_next(&mut self, state: &IterationState, _: &T) -> bool {

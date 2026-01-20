@@ -17,7 +17,7 @@ pub struct StaticHistogram<const N: usize> {
     raw_max_value: AtomicU64,
     raw_min_non_zero_value: AtomicU64,
     total_count: AtomicU64,
-    pub(in concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
+    pub(in crate::concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
 impl<const N: usize> StaticHistogram<N> {
@@ -58,6 +58,36 @@ impl<const N: usize> StaticHistogram<N> {
     #[inline(always)]
     pub fn counts_array_length(&self) -> u32 {
         unsafe { (*self.settings.get()).counts_array_length }
+    }
+
+    pub(crate) fn normalizing_index_offset(&self) -> i32 {
+        unsafe { (*self.counts.load(Ordering::Relaxed)).normalizing_index_offset() }
+    }
+
+    pub(crate) fn set_normalizing_index_offset(&self, offset: i32) {
+        unsafe { (*self.counts.load(Ordering::Relaxed)).set_normalizing_index_offset(offset) };
+    }
+
+    pub(crate) fn set_integer_to_double_value_conversion_ratio(&self, ratio: f64) {
+        unsafe {
+            let settings = &mut *self.settings.get();
+            settings.integer_to_double_value_conversion_ratio = ratio;
+            settings.double_to_integer_value_conversion_ratio = 1.0 / ratio;
+        }
+    }
+
+    pub(crate) fn set_count_at_index(&self, index: u32, count: u64) {
+        unsafe {
+            let counts = &*self.counts.load(Ordering::Relaxed);
+            let normalized_index = util::normalize_index(
+                index,
+                counts.normalizing_index_offset(),
+                counts.length(),
+            );
+            counts
+                .get_unchecked(normalized_index)
+                .store(count, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -234,15 +264,19 @@ impl<const N: usize> StaticHistogram<N> {
                 counts.length(),
             );
             let from_normalized_index = from_index + pre_shift_zero_index;
-            let count_at_from_index = counts
-                .get_unchecked(from_normalized_index)
-                .load(Ordering::Relaxed);
-            counts
-                .get_unchecked(normalized_to_index)
-                .store(count_at_from_index, Ordering::Relaxed);
-            counts
-                .get_unchecked(from_normalized_index)
-                .store(0, Ordering::Relaxed);
+            let count_at_from_index = unsafe {
+                counts
+                    .get_unchecked(from_normalized_index)
+                    .load(Ordering::Relaxed)
+            };
+            unsafe {
+                counts
+                    .get_unchecked(normalized_to_index)
+                    .store(count_at_from_index, Ordering::Relaxed);
+                counts
+                    .get_unchecked(from_normalized_index)
+                    .store(0, Ordering::Relaxed);
+            }
         }
     }
 
@@ -353,12 +387,12 @@ impl<const N: usize> StaticHistogram<N> {
     }
 
     // this is really, really unsafe. use only if you can guarantee unique access
-    pub unsafe fn unsafe_as_snapshot(&self) -> Snapshot<Self> {
+    pub unsafe fn unsafe_as_snapshot(&self) -> Snapshot<'_, Self> {
         #[allow(mutable_transmutes)]
         Snapshot::new(mem::transmute(self))
     }
 
-    pub fn as_snapshot(&mut self) -> Snapshot<Self> {
+    pub fn as_snapshot(&mut self) -> Snapshot<'_, Self> {
         unsafe { Snapshot::new(self) }
     }
 }

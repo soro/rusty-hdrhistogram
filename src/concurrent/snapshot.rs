@@ -13,27 +13,27 @@ impl<'a, T: RecordableHistogram> Deref for Snapshot<'a, T> {
 }
 
 impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
-    pub unsafe fn new(histogram: &mut T) -> Snapshot<T> {
+    pub unsafe fn new(histogram: &mut T) -> Snapshot<'_, T> {
         Snapshot(histogram)
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<T> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<'_, T> {
         PercentileIterator::new(self.0, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<T> {
+    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<'_, T> {
         LinearIterator::new(self.0, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<T> {
+    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<'_, T> {
         LogarithmicIterator::new(self.0, value_units_in_first_bucket, log_base)
     }
 
-    pub fn all_values(&self) -> AllValuesIterator<T> {
+    pub fn all_values(&self) -> AllValuesIterator<'_, T> {
         AllValuesIterator::new(self.0)
     }
 
-    pub fn recorded_values(&self) -> RecordedValuesIterator<T> {
+    pub fn recorded_values(&self) -> RecordedValuesIterator<'_, T> {
         RecordedValuesIterator::new(self.0)
     }
 

@@ -96,7 +96,7 @@ impl<T: RecordableHistogram> Recorder<T> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_betwee_values)
     }
 
-    pub fn locking_sample(&self) -> LockingSample<T> {
+    pub fn locking_sample<'a>(&'a self) -> LockingSample<'a, 'a, T> {
         let pfg = self.recording_phaser.reader_lock();
         let settings = unsafe { (&*self.active_histogram.load(Ordering::Relaxed)).settings() };
         let fresh_histogram = Box::new(T::fresh(settings).unwrap());
@@ -104,7 +104,7 @@ impl<T: RecordableHistogram> Recorder<T> {
         LockingSample::new(&self, sample, pfg)
     }
 
-    pub(in concurrent) fn perform_interval_sample<'a>(&self, inactive_histogram: *mut T, flip_guard: &PhaseFlipGuard<'a>) -> *mut T {
+    pub(in crate::concurrent) fn perform_interval_sample<'a>(&self, inactive_histogram: *mut T, flip_guard: &PhaseFlipGuard<'a>) -> *mut T {
         let active_histogram = self.active_histogram
             .swap(inactive_histogram, Ordering::SeqCst);
         unsafe {

@@ -1,6 +1,6 @@
 use crate::concurrent::ResizableHistogram;
-use crate::core::{DoubleCreationError, OverflowPolicy, RecordError, SaturateOnOverflow, ThrowOnOverflow};
-use crate::core::{ReadableHistogram, util};
+use crate::core::{DoubleCreationError, OverflowPolicy, ReadableHistogram, RecordError, SaturateOnOverflow, ThrowOnOverflow};
+use crate::core::util;
 use crate::iteration::RecordedValuesIterator;
 use parking_lot::Mutex;
 use std::marker::PhantomData;
@@ -250,6 +250,14 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
 
     pub fn get_number_of_significant_value_digits(&self) -> u8 {
         self.integer_histogram.settings().number_of_significant_value_digits as u8
+    }
+
+    pub(crate) fn bucket_count(&self) -> u32 {
+        self.integer_histogram.settings().bucket_count
+    }
+
+    pub(crate) fn counts_array_length(&self) -> u32 {
+        self.integer_histogram.settings().counts_array_length
     }
 
     pub fn set_auto_resize(&self, auto_resize: bool) {
