@@ -1,8 +1,8 @@
-use concurrent::resizable_histogram::ResizableHistogram;
+use crate::concurrent::resizable_histogram::ResizableHistogram;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use tests::rand::{self, Rng};
+use rand::Rng;
 
 #[test]
 fn concurrent_record_values() {
@@ -13,14 +13,15 @@ fn concurrent_record_values() {
     let mut values = Vec::<Arc<Vec<u32>>>::new();
     let mut handles = Vec::<thread::JoinHandle<()>>::new();
     let histogram = Arc::new(ResizableHistogram::new(2).unwrap());
-    let mut rng = rand::weak_rng();
+    let mut rng = rand::thread_rng();
     histogram.set_auto_resize(true);
 
     // TODO: pick from larger range here
     for _ in 0..THREAD_COUNT {
-        let mut vs = rng.gen_iter::<u32>()
+        let mut vs = rng
+            .sample_iter(rand::distributions::Standard)
             .take(NUM_VALS)
-            .map(|v| {
+            .map(|v: u32| {
                 total_value += v as u64;
                 v
             })

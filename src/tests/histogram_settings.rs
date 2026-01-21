@@ -1,5 +1,5 @@
-use core::HistogramSettings;
-use core::errors::*;
+use crate::core::HistogramSettings;
+use crate::core::errors::*;
 
 #[test]
 fn unit_magnitude_0_index_calculations() {
@@ -67,7 +67,7 @@ fn unit_magnitude_4_index_calculations() {
 
 #[test]
 fn unit_magnitude_52_sub_bucket_magnitude_11_index_calculations() {
-    let s = HistogramSettings::new(1_u64 << 52, u64::max_value(), 3).unwrap();
+    let s = HistogramSettings::new(1_u64 << 52, u64::MAX, 3).unwrap();
 
     assert_eq!(2048, s.sub_bucket_count);
     assert_eq!(52, s.unit_magnitude);
@@ -97,8 +97,8 @@ fn unit_magnitude_52_sub_bucket_magnitude_11_index_calculations() {
         s.get_sub_bucket_index((unit << 11) + 3 * (unit << 1), 1)
     );
 
-    assert_eq!(1, s.get_bucket_index(u64::max_value()));
-    assert_eq!(1024 + 1023, s.get_sub_bucket_index(u64::max_value(), 1));
+    assert_eq!(1, s.get_bucket_index(u64::MAX));
+    assert_eq!(1024 + 1023, s.get_sub_bucket_index(u64::MAX, 1));
 }
 
 #[test]
@@ -119,8 +119,8 @@ fn unit_magnitude_55_sub_bucket_magnitude_8_ok() {
     assert_eq!(2, s.bucket_count);
     assert_eq!(0, s.get_bucket_index(3));
     assert_eq!(0, s.get_sub_bucket_index(3, 0));
-    assert_eq!(1, s.get_bucket_index(u64::max_value()));
-    assert_eq!(128 + 127, s.get_sub_bucket_index(u64::max_value(), 1));
+    assert_eq!(1, s.get_bucket_index(u64::MAX));
+    assert_eq!(128 + 127, s.get_sub_bucket_index(u64::MAX, 1));
 }
 
 #[test]
@@ -132,6 +132,6 @@ fn unit_magnitude_62_sub_bucket_magnitude_1_ok() {
     assert_eq!(2, s.bucket_count);
     assert_eq!(0, s.get_bucket_index(3));
     assert_eq!(0, s.get_sub_bucket_index(3, 0));
-    assert_eq!(1, s.get_bucket_index(u64::max_value()));
-    assert_eq!(1, s.get_sub_bucket_index(u64::max_value(), 1));
+    assert_eq!(1, s.get_bucket_index(u64::MAX));
+    assert_eq!(1, s.get_sub_bucket_index(u64::MAX, 1));
 }

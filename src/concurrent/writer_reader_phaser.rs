@@ -11,7 +11,7 @@
 //! ```let rg = ri.reader_lock()```
 //! before finally calling `rg.flip()` once they are done executing the swap.
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, MutexGuard};
 use std::isize::MIN as ISIZE_MIN;
 use std::mem;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -54,8 +54,11 @@ impl WriterReaderPhaser {
     }
 
     pub fn reader_lock<'a>(&'a self) -> PhaseFlipGuard<'a> {
-        self.reader_lock.raw_lock();
-        PhaseFlipGuard { parent: &self }
+        let guard = self.reader_lock.lock();
+        PhaseFlipGuard {
+            parent: &self,
+            _guard: guard,
+        }
     }
 }
 
@@ -79,6 +82,7 @@ impl<'a> Drop for WriterCriticalSectionGuard<'a> {
 // Guard used to enforce lock before flip
 pub struct PhaseFlipGuard<'a> {
     parent: &'a WriterReaderPhaser,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl<'a> PhaseFlipGuard<'a> {
@@ -124,11 +128,5 @@ impl<'a> PhaseFlipGuard<'a> {
 
     pub fn reader_unlock(self) {
         mem::drop(self)
-    }
-}
-
-impl<'a> Drop for PhaseFlipGuard<'a> {
-    fn drop(&mut self) {
-        unsafe { self.parent.reader_lock.raw_unlock() }
     }
 }

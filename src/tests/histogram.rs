@@ -1,8 +1,7 @@
-use core::Counter;
-use core::errors::RecordError;
-use st::Histogram;
-use tests::consts::*;
-use tests::util::*;
+use crate::core::Counter;
+use crate::st::Histogram;
+use crate::tests::consts::*;
+use crate::tests::util::*;
 
 fn verify_max_value<T: Counter>(histogram: Histogram<T>) {
     let mut computed_max_value = 0;
@@ -39,11 +38,12 @@ fn test_record_value() {
 }
 
 #[test]
-fn record_value_overflow_should_error() {
+fn record_value_overflow_saturates() {
     let highest = 3600_u64 * 1000 * 1000;
     let mut histogram = Histogram::<u64>::with_high_sigvdig(highest, SIG_V_DIGITS).unwrap();
-    let res = histogram.record_value(highest * 3).unwrap_err();
-    assert_eq!(res, RecordError::ValueOutOfRangeResizeDisabled)
+    succ!(histogram.record_value(highest * 3));
+    let last_idx = histogram.last_index();
+    assert_eq!(Some(1), histogram.get_count_at_index(last_idx));
 }
 
 #[test]
@@ -217,6 +217,34 @@ fn scaled_lowest_equivalent_value() {
         "The lowest equivalent value to 10009 * 1024 is 10008 * 1024"
     );
     verify_max_value(histogram);
+}
+
+#[test]
+fn equals_with_different_lengths() {
+    let mut small = Histogram::<u64>::with_high_sigvdig(2_000, 2).unwrap();
+    let mut large = Histogram::<u64>::with_high_sigvdig(2_000_000, 2).unwrap();
+    assert_ne!(small.counts_array_length(), large.counts_array_length());
+
+    succ!(small.record_value(1));
+    succ!(small.record_value(1000));
+    succ!(large.record_value(1));
+    succ!(large.record_value(1000));
+
+    assert!(small == large);
+    assert!(large == small);
+}
+
+#[test]
+fn equals_with_different_lengths_detects_mismatch() {
+    let mut small = Histogram::<u64>::with_high_sigvdig(2_000, 2).unwrap();
+    let mut large = Histogram::<u64>::with_high_sigvdig(2_000_000, 2).unwrap();
+    assert_ne!(small.counts_array_length(), large.counts_array_length());
+
+    succ!(small.record_value(1000));
+    succ!(large.record_value(1500));
+
+    assert!(small != large);
+    assert!(large != small);
 }
 
 #[test]

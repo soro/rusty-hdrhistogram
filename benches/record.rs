@@ -1,6 +1,4 @@
 #![feature(test)]
-#![feature(inclusive_range_syntax)]
-
 extern crate hdrhistogram;
 extern crate rand;
 extern crate test;
@@ -11,9 +9,9 @@ use rand::Rng;
 
 #[bench]
 fn record_precalc_random_values_with_1_count_u64(b: &mut Bencher) {
-    let mut h = Histogram::<u64>::with_low_high_sigvdig(1, u64::max_value(), 3).unwrap();
+    let mut h = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
     let mut values = Vec::<u64>::new();
-    let mut rng = rand::weak_rng();
+    let mut rng = rand::thread_rng();
 
     for _ in 0..3000000 {
         values.push(rng.gen::<u64>());
@@ -28,9 +26,9 @@ fn record_precalc_random_values_with_1_count_u64(b: &mut Bencher) {
 
 #[bench]
 fn bench_percentile(b: &mut Bencher) {
-    let mut h = Histogram::<u64>::with_low_high_sigvdig(1, u64::max_value(), 3).unwrap();
+    let mut h = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
     let mut indices = Vec::<u64>::new();
-    let mut rng = rand::weak_rng();
+    let mut rng = rand::thread_rng();
 
     for _ in 0..1000000 {
         indices.push(rng.gen());
@@ -49,7 +47,7 @@ fn bench_percentile(b: &mut Bencher) {
 
 #[bench]
 fn percentile_iter(b: &mut Bencher) {
-    let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, u64::max_value(), 3).unwrap();
+    let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
     let length = 1000000;
 
     for value in 1..=length {

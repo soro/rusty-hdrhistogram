@@ -1,4 +1,4 @@
-use core::ReadableHistogram;
+use crate::core::ReadableHistogram;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IterationState {

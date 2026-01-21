@@ -1,132 +1,72 @@
-use core::util::mem_util::{alloc_guard, alloc_zeroed_array_in, get_layout};
-use std::{mem, slice};
-use std::heap::{Alloc, Heap};
-use std::ptr::{self, Unique};
-
-pub struct BackingArray<T, A: Alloc = Heap> {
-    pub(self) ptr: Unique<T>,
-    length: u32,
-    allocator: A,
+pub struct BackingArray<T> {
+    data: Vec<T>,
 }
 
-impl<T, A: Alloc> BackingArray<T, A> {
-    #[allow(unused_mut)]
+impl<T: Default + Copy> BackingArray<T> {
     #[inline]
-    pub fn new(length: u32, mut allocator: A) -> BackingArray<T, A> {
-        BackingArray::with_length_in(length, allocator)
-    }
-
-    pub fn empty(allocator: A) -> BackingArray<T, A> {
+    pub fn new(length: u32) -> BackingArray<T> {
         BackingArray {
-            ptr: Unique::empty(),
-            length: 0,
-            allocator,
+            data: vec![T::default(); length as usize],
         }
     }
 
-    // produce zeroed array of size length
-    #[allow(unused_mut)]
-    #[inline]
-    fn with_length_in(length: u32, mut allocator: A) -> BackingArray<T, A> {
-        unsafe {
-            let ptr = alloc_zeroed_array_in::<T, A>(length, &mut allocator);
-
-            BackingArray {
-                ptr: Unique::new_unchecked(ptr as *mut _),
-                length,
-                allocator,
-            }
-        }
+    pub fn empty() -> BackingArray<T> {
+        BackingArray { data: Vec::new() }
     }
 
     #[inline]
-    pub unsafe fn grow(&mut self, new_length: u32) {
-        // we just assume that new_length > self.length as this will always be the case for histograms
-        alloc_guard(new_length as usize * mem::size_of::<T>());
-        let old_layout = get_layout::<T>(self.length as usize);
-        let new_layout = get_layout::<T>(new_length as usize);
-        let new_ptr = self.allocator
-            .realloc(self.ptr.as_ptr() as *mut u8, old_layout, new_layout);
-        match new_ptr.map(|ptr| Unique::new_unchecked(ptr as *mut _)) {
-            Ok(ptr) => {
-                self.ptr = ptr;
-                self.length = new_length;
-            }
-            Err(e) => self.allocator.oom(e),
+    pub fn grow(&mut self, new_length: u32) {
+        let new_length = new_length as usize;
+        if new_length > self.data.len() {
+            self.data.resize(new_length, T::default());
         }
     }
 
     #[inline(always)]
     pub fn get(&self, index: u32) -> Option<&T> {
-        if index < self.length {
-            return Some(self.get_unchecked(index));
-        }
-        None
+        self.data.get(index as usize)
     }
 
     #[inline(always)]
     pub fn get_unchecked(&self, index: u32) -> &T {
-        unsafe {
-            let loc = self.ptr.as_ptr().offset(index as isize);
-            &*loc
-        }
+        unsafe { self.data.get_unchecked(index as usize) }
     }
 
     #[inline(always)]
     pub fn get_mut(&mut self, index: u32) -> Option<&mut T> {
-        if index < self.length {
-            return Some(self.get_unchecked_mut(index));
-        }
-        None
+        self.data.get_mut(index as usize)
     }
 
     #[inline(always)]
     pub fn get_unchecked_mut(&mut self, index: u32) -> &mut T {
-        unsafe {
-            let loc = self.ptr.as_ptr().offset(index as isize);
-            &mut *loc
-        }
+        unsafe { self.data.get_unchecked_mut(index as usize) }
     }
 
     #[inline(always)]
     pub fn length(&self) -> u32 {
-        self.length
+        self.data.len() as u32
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
-        unsafe {
-            ptr::write_bytes(self.ptr.as_mut(), 0, self.length as usize);
+        for value in &mut self.data {
+            *value = T::default();
         }
     }
 
     pub fn get_slice<'a>(&'a self, length: u32) -> Option<&'a [T]> {
-        if length <= self.length {
-            unsafe { return Some(slice::from_raw_parts(self.ptr.as_ptr(), length as usize)) };
+        let length = length as usize;
+        if length <= self.data.len() {
+            return Some(&self.data[..length]);
         }
         None
     }
 
     pub fn get_slice_mut<'a>(&'a mut self, length: u32) -> Option<&'a mut [T]> {
-        if length <= self.length {
-            unsafe {
-                return Some(slice::from_raw_parts_mut(
-                    self.ptr.as_ptr(),
-                    length as usize,
-                ));
-            };
+        let length = length as usize;
+        if length <= self.data.len() {
+            return Some(&mut self.data[..length]);
         }
         None
-    }
-}
-
-impl<T, A: Alloc> Drop for BackingArray<T, A> {
-    fn drop(&mut self) {
-        unsafe {
-            self.allocator.dealloc(
-                self.ptr.as_ptr() as *mut u8,
-                get_layout::<T>(self.length as usize),
-            );
-        }
     }
 }

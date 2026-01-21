@@ -1,5 +1,5 @@
-use core::constants::F64_SIGN_MASK;
-use core::ReadableHistogram;
+use crate::core::constants::F64_SIGN_MASK;
+use crate::core::ReadableHistogram;
 
 // this will work for two's complement floats if ints have the same endianness on the platform as floats
 pub fn next_below(value: f64) -> f64 {
@@ -20,47 +20,6 @@ pub fn next_below(value: f64) -> f64 {
     }
 }
 
-pub mod mem_util {
-    use std::heap::{Alloc, Layout};
-    use std::mem;
-
-    #[inline(always)]
-    pub fn get_layout<T>(length: usize) -> Layout {
-        let t_size = mem::size_of::<T>();
-        let size = length.checked_mul(t_size).expect("capacityoverflow");
-        unsafe { Layout::from_size_align_unchecked(size, mem::align_of::<T>()) }
-    }
-
-    #[inline(always)]
-    pub fn alloc_guard(alloc_size: usize) {
-        if mem::size_of::<usize>() < 8 {
-            assert!(
-                alloc_size <= isize::max_value() as usize,
-                "capacity overflow"
-            );
-        }
-    }
-
-    #[inline(always)]
-    pub unsafe fn alloc_zeroed_array_in<T, A: Alloc>(length: u32, allocator: &mut A) -> *mut u8 {
-        let t_size = mem::size_of::<T>();
-        let size = (length as usize)
-            .checked_mul(t_size)
-            .expect("capacity overflow");
-
-        alloc_guard(size);
-
-        if size == 0 {
-            mem::align_of::<T>() as *mut u8
-        } else {
-            match allocator.alloc_zeroed(get_layout::<T>(size)) {
-                Ok(ptr) => ptr,
-                Err(err) => allocator.oom(err),
-            }
-        }
-    }
-}
-
 pub mod hashing {
     pub fn hash_mix(h: &mut i64) {
         *h += *h << 10;
@@ -76,6 +35,21 @@ pub mod hashing {
         *h += v as i64;
         hash_mix(h);
     }
+}
+
+#[inline(always)]
+pub fn normalize_index(index: u32, normalizing_index_offset: i32, array_length: u32) -> u32 {
+    if normalizing_index_offset == 0 {
+        return index;
+    }
+    let length = array_length as i64;
+    let mut normalized = index as i64 - normalizing_index_offset as i64;
+    if normalized < 0 {
+        normalized += length;
+    } else if normalized >= length {
+        normalized -= length;
+    }
+    normalized as u32
 }
 
 #[macro_export]
@@ -101,4 +75,3 @@ pub fn recalculate_internal_tracking_values<H: ReadableHistogram>(histogram: &mu
     }
     (new_max, new_min, new_total)
 }
-

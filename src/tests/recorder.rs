@@ -1,13 +1,16 @@
-use concurrent::recordable_histogram::RecordableHistogram;
-use concurrent::recorder::{self, Recorder};
-use core::*;
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::concurrent::resizable_histogram::ResizableHistogram;
+use crate::concurrent::recorder::{self, Recorder};
+use crate::core::constants::ORIGINAL_MIN;
+use crate::core::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
-use tests::rand::{self, Rng};
+use rand::Rng;
 
 const HIGHEST_TRACKABLE: u64 = 3600 * 1000 * 1000;
+const STATIC_COUNTS_LEN: usize = 3328;
 
 #[test]
 fn resizing_recorder() {
@@ -17,8 +20,59 @@ fn resizing_recorder() {
 
 #[test]
 fn static_recorder() {
-    let recorder = Arc::new(recorder::static_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
+    let recorder = Arc::new(recorder::static_with_low_high_sigvdig::<STATIC_COUNTS_LEN>(1, HIGHEST_TRACKABLE, 2).unwrap());
     run_recorder_test(recorder);
+}
+
+#[test]
+fn recorder_resample_resets_tracking() {
+    let recorder = recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+
+    succ!(recorder.record_value(1));
+    succ!(recorder.record_value(1000));
+
+    let mut sample = recorder.locking_sample();
+    {
+        let snapshot = sample.histogram();
+        assert_eq!(snapshot.get_total_count(), 2);
+        assert_eq!(snapshot.get_min_non_zero_value(), 1);
+        assert_eq!(snapshot.get_max_value(), 1000);
+    }
+
+    succ!(recorder.record_value(500));
+    sample = sample.resample();
+
+    {
+        let snapshot = sample.histogram();
+        assert_eq!(snapshot.get_total_count(), 1);
+        assert_eq!(snapshot.get_min_non_zero_value(), 500);
+        assert_eq!(snapshot.get_max_value(), 500);
+    }
+}
+
+#[test]
+fn clear_counts_resets_metadata() {
+    let mut histogram = ResizableHistogram::with_low_high_sigvdig(
+        1,
+        HIGHEST_TRACKABLE,
+        2,
+    )
+    .unwrap();
+
+    histogram.meta_data_mut().set_tag_string("tag".to_string());
+    histogram.meta_data_mut().set_start_now();
+    histogram.meta_data_mut().set_end_now();
+    succ!(histogram.record_value(123));
+
+    unsafe { histogram.clear_counts() };
+
+    assert_eq!(histogram.get_total_count(), 0);
+    assert_eq!(histogram.get_min_non_zero_value(), ORIGINAL_MIN);
+    assert_eq!(histogram.get_max_value(), 0);
+    let meta_data = histogram.meta_data();
+    assert!(meta_data.tag.is_none());
+    assert!(meta_data.start_timestamp.is_none());
+    assert!(meta_data.end_timestamp.is_none());
 }
 
 
@@ -29,12 +83,13 @@ fn run_recorder_test<T: 'static + RecordableHistogram>(recorder: Arc<Recorder<T>
     let ready_var = Arc::new(AtomicBool::new(false));
     let mut values = Vec::<Arc<Vec<u32>>>::new();
     let mut handles = Vec::<thread::JoinHandle<()>>::new();
-    let mut rng = rand::weak_rng();
+    let mut rng = rand::thread_rng();
 
     for _ in 0..THREAD_COUNT {
-        let mut vs = rng.gen_iter::<u32>()
+        let mut vs = rng
+            .sample_iter(rand::distributions::Standard)
             .take(NUM_VALS)
-            .map(|v| {
+            .map(|v: u32| {
                 total_value += v as u64;
                 v
             })

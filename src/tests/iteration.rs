@@ -1,4 +1,4 @@
-use tests::util::*;
+use crate::tests::util::*;
 
 #[test]
 fn percentiles() {

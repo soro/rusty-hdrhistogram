@@ -1,15 +1,17 @@
-use concurrent::{concurrent_util, Snapshot};
-use concurrent::inline_backing_array::InlineBackingArray;
-use concurrent::recordable_histogram::RecordableHistogram;
-use core::*;
-use core::constants::*;
-use std::{heap, mem, ptr, slice};
+use crate::concurrent::{concurrent_util, Snapshot};
+use crate::concurrent::inline_backing_array::InlineBackingArray;
+use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::core::*;
+use crate::core::constants::*;
+use crate::iteration::RecordedValuesIterator;
+use std::convert::TryFrom;
+use std::{mem, ptr};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicPtr, AtomicU64};
 use std::sync::atomic::Ordering;
 
 #[repr(C)]
-pub struct StaticHistogram {
+pub struct StaticHistogram<const N: usize> {
     meta_data: HistogramMetaData,
     settings: UnsafeCell<HistogramSettings>,
     raw_max_value: AtomicU64,
@@ -18,23 +20,31 @@ pub struct StaticHistogram {
     pub(in concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
-impl StaticHistogram {
-    pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<StaticHistogram, CreationError> {
-        StaticHistogram::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
+impl<const N: usize> StaticHistogram<N> {
+    pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<StaticHistogram<N>, CreationError> {
+        Self::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
     }
     pub fn with_low_high_sigvdig(
         lowest_discernible_value: u64,
         highest_trackable_value: u64,
         significant_value_digits: u8,
-    ) -> Result<StaticHistogram, CreationError> {
+    ) -> Result<StaticHistogram<N>, CreationError> {
+        let counts_array_length = u32::try_from(N)
+            .map_err(|_| CreationError::RequiresExcessiveArrayLen)?;
         let settings = HistogramSettings::new(
             lowest_discernible_value,
             highest_trackable_value,
             significant_value_digits,
         )?;
+        if settings.counts_array_length != counts_array_length {
+            return Err(CreationError::CountsArrayLengthMismatch {
+                expected: counts_array_length,
+                actual: settings.counts_array_length,
+            });
+        }
         unsafe {
-            let array_ptr = InlineBackingArray::new_in(settings.counts_array_length, heap::Heap);
-            Ok(StaticHistogram {
+            let array_ptr = InlineBackingArray::new(counts_array_length);
+            Ok(StaticHistogram::<N> {
                 meta_data: HistogramMetaData::new(),
                 settings: UnsafeCell::new(settings),
                 raw_max_value: AtomicU64::new(ORIGINAL_MAX),
@@ -67,13 +77,28 @@ impl StaticHistogram {
 
             let counts = &*self.counts.load(Ordering::Relaxed);
             if idx < counts.length() {
-                let c = counts.get_unchecked(idx);
+                let normalized_index = util::normalize_index(
+                    idx,
+                    counts.normalizing_index_offset(),
+                    counts.length(),
+                );
+                let c = counts.get_unchecked(normalized_index);
                 c.fetch_add(count, Ordering::Relaxed);
                 self.update_min_and_max(value);
                 self.total_count.fetch_add(count, Ordering::Relaxed);
                 Ok(())
             } else {
-                Err(RecordError::ValueOutOfRangeResizeDisabled)
+                let last_idx = counts.length() - 1;
+                let normalized_index = util::normalize_index(
+                    last_idx,
+                    counts.normalizing_index_offset(),
+                    counts.length(),
+                );
+                let c = counts.get_unchecked(normalized_index);
+                c.fetch_add(count, Ordering::Relaxed);
+                self.update_min_and_max(value);
+                self.total_count.fetch_add(count, Ordering::Relaxed);
+                Ok(())
             }
         }
     }
@@ -98,6 +123,129 @@ impl StaticHistogram {
         concurrent_util::update_min_non_zero_value(&self.settings, &self.raw_min_non_zero_value, value);
     }
 
+    pub(crate) fn shift_values_left(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.get_total_count() == self.unsafe_get_count_at_index(0) {
+            return Ok(());
+        }
+
+        let shift_amount = number_of_binary_orders_of_magnitude << self.settings().sub_bucket_half_count_magnitude;
+        let max_value_index = self.settings().counts_array_index(self.get_max_value());
+        if max_value_index >= (self.counts_array_length() - shift_amount) {
+            return Err(ShiftError::Overflow);
+        }
+
+        let max_before = self.raw_max_value.swap(ORIGINAL_MAX, Ordering::Relaxed);
+        let min_before = self.raw_min_non_zero_value.swap(ORIGINAL_MIN, Ordering::Relaxed);
+        let lowest_half_bucket_populated =
+            min_before < ((self.settings().sub_bucket_half_count as u64) << self.settings().unit_magnitude);
+
+        self.shift_normalizing_index_by_offset(shift_amount as i32, lowest_half_bucket_populated)?;
+
+        self.update_min_and_max(max_before << number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before << number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shift_values_right(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), ShiftError> {
+        if number_of_binary_orders_of_magnitude == 0 {
+            return Ok(());
+        }
+        if self.get_total_count() == self.unsafe_get_count_at_index(0) {
+            return Ok(());
+        }
+
+        let shift_amount = self.settings().sub_bucket_half_count * number_of_binary_orders_of_magnitude;
+        let min_non_zero_value_index = self.settings().counts_array_index(self.get_min_non_zero_value());
+        if min_non_zero_value_index < shift_amount + self.settings().sub_bucket_half_count {
+            return Err(ShiftError::Underflow);
+        }
+
+        let max_before = self.raw_max_value.swap(ORIGINAL_MAX, Ordering::Relaxed);
+        let min_before = self.raw_min_non_zero_value.swap(ORIGINAL_MIN, Ordering::Relaxed);
+
+        self.shift_normalizing_index_by_offset(-(shift_amount as i32), false)?;
+
+        self.update_min_and_max(max_before >> number_of_binary_orders_of_magnitude);
+        if min_before != ORIGINAL_MIN {
+            self.update_min_and_max(min_before >> number_of_binary_orders_of_magnitude);
+        }
+        Ok(())
+    }
+
+    fn shift_normalizing_index_by_offset(
+        &self,
+        offset_to_add: i32,
+        lowest_half_bucket_populated: bool,
+    ) -> Result<(), ShiftError> {
+        unsafe {
+            let counts = &*self.counts.load(Ordering::Relaxed);
+            let pre_shift_zero_index = util::normalize_index(
+                0,
+                counts.normalizing_index_offset(),
+                counts.length(),
+            );
+            let zero_value_count = counts
+                .get_unchecked(pre_shift_zero_index)
+                .load(Ordering::Relaxed);
+            counts
+                .get_unchecked(pre_shift_zero_index)
+                .store(0, Ordering::Relaxed);
+
+            counts.set_normalizing_index_offset(counts.normalizing_index_offset() + offset_to_add);
+
+            if lowest_half_bucket_populated {
+                if offset_to_add <= 0 {
+                    return Err(ShiftError::Underflow);
+                }
+                self.shift_lowest_half_bucket_contents_left(counts, offset_to_add as u32, pre_shift_zero_index);
+            }
+
+            let new_zero_index = util::normalize_index(
+                0,
+                counts.normalizing_index_offset(),
+                counts.length(),
+            );
+            counts
+                .get_unchecked(new_zero_index)
+                .store(zero_value_count, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    fn shift_lowest_half_bucket_contents_left(
+        &self,
+        counts: &InlineBackingArray<AtomicU64>,
+        shift_amount: u32,
+        pre_shift_zero_index: u32,
+    ) {
+        let number_of_binary_orders_of_magnitude =
+            shift_amount >> self.settings().sub_bucket_half_count_magnitude;
+        for from_index in 1..self.settings().sub_bucket_half_count {
+            let to_value = self.settings().value_from_index(from_index) << number_of_binary_orders_of_magnitude;
+            let to_index = self.settings().counts_array_index(to_value);
+            let normalized_to_index = util::normalize_index(
+                to_index,
+                counts.normalizing_index_offset(),
+                counts.length(),
+            );
+            let from_normalized_index = from_index + pre_shift_zero_index;
+            let count_at_from_index = counts
+                .get_unchecked(from_normalized_index)
+                .load(Ordering::Relaxed);
+            counts
+                .get_unchecked(normalized_to_index)
+                .store(count_at_from_index, Ordering::Relaxed);
+            counts
+                .get_unchecked(from_normalized_index)
+                .store(0, Ordering::Relaxed);
+        }
+    }
+
     #[inline(always)]
     pub fn is_auto_resize(&self) -> bool {
         unsafe { (*self.settings.get()).auto_resize }
@@ -109,7 +257,12 @@ impl StaticHistogram {
             if index >= counts.length() {
                 None
             } else {
-                Some(counts.get_unchecked(index).load(Ordering::Relaxed))
+                let normalized_index = util::normalize_index(
+                    index,
+                    counts.normalizing_index_offset(),
+                    counts.length(),
+                );
+                Some(counts.get_unchecked(normalized_index).load(Ordering::Relaxed))
             }
         }
     }
@@ -118,7 +271,12 @@ impl StaticHistogram {
         unsafe {
             let counts = &*self.counts.load(Ordering::Relaxed);
 
-            counts.get_unchecked(index).load(Ordering::Relaxed)
+            let normalized_index = util::normalize_index(
+                index,
+                counts.normalizing_index_offset(),
+                counts.length(),
+            );
+            counts.get_unchecked(normalized_index).load(Ordering::Relaxed)
         }
     }
 
@@ -136,10 +294,17 @@ impl StaticHistogram {
 
     pub unsafe fn clear_counts(&self) {
         let counts = self.counts.load(Ordering::Relaxed);
+        let settings = &*self.settings.get();
         for i in 0..self.counts_array_length() {
             (*counts).get_unchecked(i).store(0, Ordering::Relaxed);
         }
         self.total_count.store(0, Ordering::Relaxed);
+        self.raw_max_value
+            .store(ORIGINAL_MAX | settings.unit_magnitude_mask, Ordering::Relaxed);
+        self.raw_min_non_zero_value
+            .store(ORIGINAL_MIN, Ordering::Relaxed);
+        let meta_data = &self.meta_data as *const HistogramMetaData as *mut HistogramMetaData;
+        (*meta_data).clear();
     }
 
     unsafe fn copy_counts(&self, source: &InlineBackingArray<AtomicU64>, target: &mut InlineBackingArray<AtomicU64>) {
@@ -148,9 +313,10 @@ impl StaticHistogram {
             (*target).get_array_ptr(),
             self.counts_array_length() as usize,
         );
+        target.set_normalizing_index_offset(source.normalizing_index_offset());
     }
 
-    fn equals(&mut self, other: &mut Self) -> bool {
+    fn equals(&self, other: &Self) -> bool {
         if ptr::eq(self, other) {
             return true;
         }
@@ -163,11 +329,25 @@ impl StaticHistogram {
             self.get_min_non_zero_value(),
             other.get_min_non_zero_value()
         );
-        for i in 0..self.counts_array_length() {
-            check_eq!(
-                self.unsafe_get_count_at_index(i),
-                other.unsafe_get_count_at_index(i)
-            )
+        let self_len = self.counts_array_length();
+        let other_len = other.counts_array_length();
+        if self_len == other_len {
+            for i in 0..self_len {
+                check_eq!(
+                    self.unsafe_get_count_at_index(i),
+                    other.unsafe_get_count_at_index(i)
+                )
+            }
+        } else {
+            let other_last = other_len - 1;
+            for value in RecordedValuesIterator::new(self) {
+                let mut other_index = other.settings().counts_array_index(value.value_iterated_to);
+                if other_index > other_last {
+                    other_index = other_last;
+                }
+                let other_count = other.unsafe_get_count_at_index(other_index);
+                check_eq!(value.count_at_value_iterated_to, other_count);
+            }
         }
         return true;
     }
@@ -183,9 +363,9 @@ impl StaticHistogram {
     }
 }
 
-impl ConstructableHistogram for StaticHistogram {
+impl<const N: usize> ConstructableHistogram for StaticHistogram<N> {
     fn new(lowest_discernible_value: u64, highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {
-        StaticHistogram::with_low_high_sigvdig(
+        StaticHistogram::<N>::with_low_high_sigvdig(
             lowest_discernible_value,
             highest_trackable_value,
             significant_value_digits,
@@ -198,7 +378,7 @@ impl ConstructableHistogram for StaticHistogram {
             Ordering::Relaxed,
         );
         self.raw_min_non_zero_value.store(
-            ORIGINAL_MIN & !self.settings().unit_magnitude_mask,
+            ORIGINAL_MIN,
             Ordering::Relaxed,
         );
         let array_length = self.counts_array_length();
@@ -216,12 +396,12 @@ impl ConstructableHistogram for StaticHistogram {
     }
 }
 
-impl RecordableHistogram for StaticHistogram {
-    fn fresh(settings: &HistogramSettings) -> Result<StaticHistogram, CreationError> {
+impl<const N: usize> RecordableHistogram for StaticHistogram<N> {
+    fn fresh(settings: &HistogramSettings) -> Result<StaticHistogram<N>, CreationError> {
         let lowest_discernable = settings.lowest_discernible_value;
         let highest_trackable = settings.highest_trackable_value;
         let sigvdig = settings.number_of_significant_value_digits as u8;
-        StaticHistogram::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
+        StaticHistogram::<N>::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
     }
     #[inline(always)]
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData {
@@ -229,37 +409,22 @@ impl RecordableHistogram for StaticHistogram {
     }
     #[inline(always)]
     unsafe fn clear_counts(&self) {
-        StaticHistogram::clear_counts(self);
+        StaticHistogram::<N>::clear_counts(self);
     }
     fn equals(&mut self, other: &mut Self) -> bool {
-        StaticHistogram::equals(self, other)
+        StaticHistogram::<N>::equals(self, other)
     }
     #[inline(always)]
     fn record_value(&self, value: u64) -> Result<(), RecordError> {
-        StaticHistogram::record_value(self, value)
+        StaticHistogram::<N>::record_value(self, value)
     }
     #[inline(always)]
     fn record_value_with_count(&self, value: u64, count: u64) -> Result<(), RecordError> {
-        StaticHistogram::record_value_with_count(self, value, count)
+        StaticHistogram::<N>::record_value_with_count(self, value, count)
     }
 }
 
-impl MutSliceableHistogram<u64> for StaticHistogram {
-    fn get_counts_slice_mut<'b>(&'b mut self, length: u32) -> Option<&'b mut [u64]> {
-        unsafe {
-            let counts = self.counts.load(Ordering::Relaxed);
-            if length <= (*counts).length() {
-                return Some(slice::from_raw_parts_mut(
-                    mem::transmute((*counts).get_array_ptr()),
-                    length as usize,
-                ));
-            }
-            None
-        }
-    }
-}
-
-impl ReadableHistogram for StaticHistogram {
+impl<const N: usize> ReadableHistogram for StaticHistogram<N> {
     #[inline(always)]
     fn settings(&self) -> &HistogramSettings {
         unsafe { &*self.settings.get() }
@@ -274,7 +439,7 @@ impl ReadableHistogram for StaticHistogram {
         self.unsafe_get_count_at_index(idx)
     }
     fn get_max_value(&self) -> u64 {
-        StaticHistogram::get_max_value(self)
+        StaticHistogram::<N>::get_max_value(self)
     }
     fn meta_data(&self) -> &HistogramMetaData { &self.meta_data }
 }

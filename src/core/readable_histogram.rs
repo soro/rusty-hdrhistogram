@@ -1,4 +1,4 @@
-use core::{HistogramMetaData, HistogramSettings};
+use crate::core::{HistogramMetaData, HistogramSettings};
 
 pub trait ReadableHistogram {
     // required for iteration
@@ -7,7 +7,6 @@ pub trait ReadableHistogram {
     fn get_total_count(&self) -> u64;
     fn unsafe_get_count_at_index(&self, idx: u32) -> u64;
 
-    // required for serialization
     fn get_max_value(&self) -> u64;
 
     fn meta_data(&self) -> &HistogramMetaData;
