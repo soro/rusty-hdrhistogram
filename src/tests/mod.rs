@@ -8,3 +8,4 @@ mod recorder;
 mod iteration;
 mod bench;
 mod double_histogram;
+mod encoding;

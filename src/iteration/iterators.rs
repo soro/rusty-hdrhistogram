@@ -34,7 +34,7 @@ impl<'a, T: 'a + ReadableHistogram> Iterator for AllValuesIterator<'a, T> {
 pub struct RecordedValuesIterator<'a, T: 'a>(HistogramIterator<'a, T, RecordedValuesStrategy>);
 
 impl<'a, T: 'a + ReadableHistogram> RecordedValuesIterator<'a, T> {
-    pub fn new(histogram: &T) -> RecordedValuesIterator<T> {
+    pub fn new(histogram: &T) -> RecordedValuesIterator<'_, T> {
         let strategy = RecordedValuesStrategy { visited_index: -1 };
         let state = IterationState::new(histogram);
         RecordedValuesIterator(HistogramIterator {
@@ -104,7 +104,7 @@ impl<'a, T: 'a + ReadableHistogram> Iterator for RecordedValuesIterator<'a, T> {
 pub struct LinearIterator<'a, T: 'a>(HistogramIterator<'a, T, LinearStrategy>);
 
 impl<'a, T: 'a + ReadableHistogram> LinearIterator<'a, T> {
-    pub fn new(histogram: &T, value_units_per_bucket: u64) -> LinearIterator<T> {
+    pub fn new(histogram: &T, value_units_per_bucket: u64) -> LinearIterator<'_, T> {
         let highest_level = value_units_per_bucket - 1;
         let strategy = LinearStrategy {
             value_units_per_bucket,
@@ -143,7 +143,7 @@ impl<'a, T: 'a + ReadableHistogram> Iterator for LinearIterator<'a, T> {
 pub struct LogarithmicIterator<'a, T: 'a>(HistogramIterator<'a, T, LogarithmicStrategy>);
 
 impl<'a, T: 'a + ReadableHistogram> LogarithmicIterator<'a, T> {
-    pub fn new(histogram: &T, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<T> {
+    pub fn new(histogram: &T, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<'_, T> {
         let hvrl = value_units_in_first_bucket - 1;
         let strategy = LogarithmicStrategy {
             value_units_in_first_bucket,
@@ -185,7 +185,7 @@ impl<'a, T: 'a + ReadableHistogram> Iterator for LogarithmicIterator<'a, T> {
 pub struct PercentileIterator<'a, T: 'a>(HistogramIterator<'a, T, PercentileStrategy>);
 
 impl<'a, T: 'a + ReadableHistogram> PercentileIterator<'a, T> {
-    pub fn new(histogram: &T, percentile_ticks_per_half_distance: u32) -> PercentileIterator<T> {
+    pub fn new(histogram: &T, percentile_ticks_per_half_distance: u32) -> PercentileIterator<'_, T> {
         let strategy = PercentileStrategy {
             percentile_ticks_per_half_distance: percentile_ticks_per_half_distance as isize,
             percentile_level_to_iterate_to: 0.0,

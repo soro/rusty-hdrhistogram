@@ -36,7 +36,8 @@ fn recorder_resample_resets_tracking() {
         let snapshot = sample.histogram();
         assert_eq!(snapshot.get_total_count(), 2);
         assert_eq!(snapshot.get_min_non_zero_value(), 1);
-        assert_eq!(snapshot.get_max_value(), 1000);
+        let expected_max = snapshot.settings().highest_equivalent_value(1000);
+        assert_eq!(snapshot.get_max_value(), expected_max);
     }
 
     succ!(recorder.record_value(500));
@@ -46,7 +47,8 @@ fn recorder_resample_resets_tracking() {
         let snapshot = sample.histogram();
         assert_eq!(snapshot.get_total_count(), 1);
         assert_eq!(snapshot.get_min_non_zero_value(), 500);
-        assert_eq!(snapshot.get_max_value(), 500);
+        let expected_max = snapshot.settings().highest_equivalent_value(500);
+        assert_eq!(snapshot.get_max_value(), expected_max);
     }
 }
 
@@ -86,7 +88,7 @@ fn run_recorder_test<T: 'static + RecordableHistogram>(recorder: Arc<Recorder<T>
     let mut rng = rand::thread_rng();
 
     for _ in 0..THREAD_COUNT {
-        let mut vs = rng
+        let vs = (&mut rng)
             .sample_iter(rand::distributions::Standard)
             .take(NUM_VALS)
             .map(|v: u32| {

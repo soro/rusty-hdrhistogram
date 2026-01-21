@@ -17,7 +17,7 @@ pub struct ResizableHistogram {
     raw_max_value: AtomicU64,
     raw_min_non_zero_value: AtomicU64,
     total_count: AtomicU64,
-    pub(in concurrent) active_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
+    pub(in crate::concurrent) active_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
     inactive_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
@@ -73,6 +73,35 @@ impl ResizableHistogram {
 
     pub fn counts_array_length(&self) -> u32 {
         unsafe { (*self.settings.get()).counts_array_length }
+    }
+
+    pub(crate) fn normalizing_index_offset(&self) -> i32 {
+        unsafe { (*self.active_counts.load(Ordering::Relaxed)).normalizing_index_offset() }
+    }
+
+    pub(crate) fn set_normalizing_index_offset(&self, offset: i32) {
+        let _lg = self.wrp.reader_lock();
+        unsafe {
+            let active_counts = &*self.active_counts.load(Ordering::Relaxed);
+            let inactive_counts = &*self.inactive_counts.load(Ordering::Relaxed);
+            active_counts.set_normalizing_index_offset(offset);
+            inactive_counts.set_normalizing_index_offset(offset);
+        }
+    }
+
+    pub(crate) fn set_count_at_index(&self, index: u32, count: u64) {
+        let _lg = self.wrp.reader_lock();
+        unsafe {
+            let active_counts = &*self.active_counts.load(Ordering::Relaxed);
+            let normalized_index = util::normalize_index(
+                index,
+                active_counts.normalizing_index_offset(),
+                active_counts.length(),
+            );
+            active_counts
+                .get_unchecked(normalized_index)
+                .store(count, Ordering::Relaxed);
+        }
     }
 
     #[inline(always)]
@@ -300,12 +329,16 @@ impl ResizableHistogram {
             inactive_counts.normalizing_index_offset(),
             inactive_counts.length(),
         );
-        let zero_value_count = inactive_counts
-            .get_unchecked(pre_shift_zero_index)
-            .load(Ordering::Relaxed);
-        inactive_counts
-            .get_unchecked(pre_shift_zero_index)
-            .store(0, Ordering::Relaxed);
+        let zero_value_count = unsafe {
+            inactive_counts
+                .get_unchecked(pre_shift_zero_index)
+                .load(Ordering::Relaxed)
+        };
+        unsafe {
+            inactive_counts
+                .get_unchecked(pre_shift_zero_index)
+                .store(0, Ordering::Relaxed);
+        }
 
         inactive_counts.set_normalizing_index_offset(new_normalizing_index_offset);
 
@@ -324,9 +357,11 @@ impl ResizableHistogram {
             inactive_counts.normalizing_index_offset(),
             inactive_counts.length(),
         );
-        inactive_counts
-            .get_unchecked(new_zero_index)
-            .store(zero_value_count, Ordering::Relaxed);
+        unsafe {
+            inactive_counts
+                .get_unchecked(new_zero_index)
+                .store(zero_value_count, Ordering::Relaxed);
+        }
 
         Ok(())
     }
@@ -348,15 +383,19 @@ impl ResizableHistogram {
                 inactive_counts.length(),
             );
             let from_normalized_index = from_index + pre_shift_zero_index;
-            let count_at_from_index = inactive_counts
-                .get_unchecked(from_normalized_index)
-                .load(Ordering::Relaxed);
-            inactive_counts
-                .get_unchecked(normalized_to_index)
-                .store(count_at_from_index, Ordering::Relaxed);
-            inactive_counts
-                .get_unchecked(from_normalized_index)
-                .store(0, Ordering::Relaxed);
+            let count_at_from_index = unsafe {
+                inactive_counts
+                    .get_unchecked(from_normalized_index)
+                    .load(Ordering::Relaxed)
+            };
+            unsafe {
+                inactive_counts
+                    .get_unchecked(normalized_to_index)
+                    .store(count_at_from_index, Ordering::Relaxed);
+                inactive_counts
+                    .get_unchecked(from_normalized_index)
+                    .store(0, Ordering::Relaxed);
+            }
         }
     }
 
@@ -484,10 +523,10 @@ impl ResizableHistogram {
                 return Err(CreationError::RequiresExcessiveArrayLen);
             }
 
-            let counts_delta = new_array_length - settings.counts_array_length;
-            if counts_delta == 0 {
+            if new_array_length <= settings.counts_array_length {
                 return Ok(());
             }
+            let counts_delta = new_array_length - settings.counts_array_length;
 
             let new_inactive_counts_1 = InlineBackingArray::<AtomicU64>::new(new_array_length);
             let new_inactive_counts_2 = InlineBackingArray::<AtomicU64>::new(new_array_length);
@@ -588,12 +627,17 @@ impl ResizableHistogram {
                     other_inactive_counts.normalizing_index_offset(),
                     other_inactive_counts.length(),
                 );
-                check_eq!(
-                    inactive_counts.get_unchecked(inactive_index).load(Ordering::Relaxed),
+                let inactive_count = unsafe {
+                    inactive_counts
+                        .get_unchecked(inactive_index)
+                        .load(Ordering::Relaxed)
+                };
+                let other_inactive_count = unsafe {
                     other_inactive_counts
                         .get_unchecked(other_inactive_index)
                         .load(Ordering::Relaxed)
-                );
+                };
+                check_eq!(inactive_count, other_inactive_count);
             }
         } else {
             let other_last = other_len - 1;
@@ -609,7 +653,7 @@ impl ResizableHistogram {
         return true;
     }
 
-    pub(in concurrent) fn write_inactive_to_active(&self) { unsafe {
+    pub(in crate::concurrent) fn write_inactive_to_active(&self) { unsafe {
         let _lg = self.wrp.reader_lock();
         let active_counts = self.active_counts.load(Ordering::Relaxed);
         let inactive_counts = self.inactive_counts.load(Ordering::Relaxed);
@@ -633,12 +677,12 @@ impl ResizableHistogram {
         }
     }}
 
-    pub unsafe fn unsafe_as_snapshot(&self) -> Snapshot<Self> {
+    pub unsafe fn unsafe_as_snapshot(&self) -> Snapshot<'_, Self> {
         #[allow(mutable_transmutes)]
         Snapshot::new(mem::transmute(self))
     }
 
-    pub fn as_snapshot(&mut self) -> Snapshot<Self> {
+    pub fn as_snapshot(&mut self) -> Snapshot<'_, Self> {
         unsafe { Snapshot::new(self) }
     }
 }

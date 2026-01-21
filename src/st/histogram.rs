@@ -45,6 +45,14 @@ impl<T: Counter> Histogram<T> {
         self.counts.length()
     }
 
+    pub(crate) fn normalizing_index_offset(&self) -> i32 {
+        self.normalizing_index_offset
+    }
+
+    pub(crate) fn set_normalizing_index_offset(&mut self, offset: i32) {
+        self.normalizing_index_offset = offset;
+    }
+
     #[inline(always)]
     fn normalize_index(&self, index: u32) -> u32 {
         util::normalize_index(index, self.normalizing_index_offset, self.counts_array_length())
@@ -289,6 +297,10 @@ impl<T: Counter> Histogram<T> {
         *self.counts.get_unchecked_mut(normalized_index) = count;
     }
 
+    pub(crate) fn set_count_at_logical_index(&mut self, idx: u32, count: T) {
+        self.set_count_at_index(idx, count);
+    }
+
     #[inline(always)]
     fn set_count_at_normalized_index(&mut self, idx: u32, count: T) {
         *self.counts.get_unchecked_mut(idx) = count;
@@ -437,6 +449,11 @@ impl<T: Counter> Histogram<T> {
     }
 
     #[inline(always)]
+    pub(crate) fn record_value_with_count_strict(&mut self, value: u64, count: T) -> Result<(), RecordError> {
+        self.record_count_at_value_strict(count, value)
+    }
+
+    #[inline(always)]
     pub fn record_value_with_count(&mut self, value: u64, count: T) -> Result<(), RecordError> {
         self.record_count_at_value(count, value)
     }
@@ -456,6 +473,22 @@ impl<T: Counter> Histogram<T> {
             self.update_min_and_max(value);
             self.total_count += count.as_u64();
             Ok(())
+        } else {
+            self.resize_and_record(value, idx, count)
+        }
+    }
+
+    #[inline(always)]
+    fn record_count_at_value_strict(&mut self, count: T, value: u64) -> Result<(), RecordError> {
+        let idx = self.settings.counts_array_index(value);
+
+        if idx < self.counts.length() {
+            self.add_to_count_at_index(idx, count);
+            self.update_min_and_max(value);
+            self.total_count += count.as_u64();
+            Ok(())
+        } else if !self.is_auto_resize() {
+            Err(RecordError::ValueOutOfRangeResizeDisabled)
         } else {
             self.resize_and_record(value, idx, count)
         }
@@ -634,23 +667,23 @@ impl<T: Counter> Histogram<T> {
             .map_err(|e| RecordError::ResizeFailed(e))
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<Self> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<'_, Self> {
         PercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<Self> {
+    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<'_, Self> {
         LinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<Self> {
+    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<'_, Self> {
         LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 
-    pub fn all_values(&self) -> AllValuesIterator<Self> {
+    pub fn all_values(&self) -> AllValuesIterator<'_, Self> {
         AllValuesIterator::new(self)
     }
 
-    pub fn recorded_values(&self) -> RecordedValuesIterator<Self> {
+    pub fn recorded_values(&self) -> RecordedValuesIterator<'_, Self> {
         RecordedValuesIterator::new(self)
     }
 }

@@ -2,9 +2,9 @@ use crate::core::{HistogramSettings, ReadableHistogram};
 use crate::iteration::*;
 
 pub struct HistogramIterator<'a, T: 'a, S> {
-    pub(in iteration) histogram: &'a T,
-    pub(in iteration) state: IterationState,
-    pub(in iteration) strategy: S,
+    pub(in crate::iteration) histogram: &'a T,
+    pub(in crate::iteration) state: IterationState,
+    pub(in crate::iteration) strategy: S,
 }
 
 impl<'a, T: ReadableHistogram, S: IterationStrategy<T>> HistogramIterator<'a, T, S> {

@@ -18,7 +18,6 @@ impl<'a, 'b: 'a, T: RecordableHistogram> LockingSample<'a, 'b, T> {
             histogram: AtomicPtr::new(histogram),
             guard,
         };
-        mem::forget(histogram);
         sample
     }
 
@@ -33,7 +32,7 @@ impl<'a, 'b: 'a, T: RecordableHistogram> LockingSample<'a, 'b, T> {
         }
     }
 
-    pub fn histogram(&self) -> Snapshot<T> {
+    pub fn histogram(&self) -> Snapshot<'_, T> {
         unsafe { Snapshot::new(&mut *self.histogram.load(Ordering::Relaxed)) }
     }
 }

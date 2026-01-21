@@ -225,6 +225,14 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         self.integer_histogram.get_number_of_significant_value_digits() as u8
     }
 
+    pub(crate) fn bucket_count(&self) -> u32 {
+        self.integer_histogram.settings().bucket_count
+    }
+
+    pub(crate) fn counts_array_length(&self) -> u32 {
+        self.integer_histogram.settings().counts_array_length
+    }
+
     pub fn set_auto_resize(&mut self, auto_resize: bool) {
         self.auto_resize = auto_resize;
     }
@@ -338,7 +346,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
         if value == 0.0 {
-            return self.integer_histogram.record_value_with_count(0, count);
+            return self.integer_histogram.record_value_with_count_strict(0, count);
         }
         if value < 0.0 {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
@@ -360,7 +368,19 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         }
 
         let integer_value = self.to_integer_value(value)?;
-        self.integer_histogram.record_value_with_count(integer_value, count)
+        match self
+            .integer_histogram
+            .record_value_with_count_strict(integer_value, count)
+        {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if P::SATURATE {
+                    self.integer_histogram.record_value_with_count(integer_value, count)
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     fn auto_adjust_range_for_value(&mut self, value: f64) -> Result<(), RecordError> {
@@ -408,7 +428,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
 
         let result = (|| {
             if self.integer_histogram.get_total_count()
-                > self.integer_histogram.unsafe_get_count_at_index(0).as_u64()
+                > *self.integer_histogram.unsafe_get_count_at_index(0)
             {
                 if self
                     .integer_histogram
@@ -440,7 +460,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
 
         let result = (|| {
             if self.integer_histogram.get_total_count()
-                > self.integer_histogram.unsafe_get_count_at_index(0).as_u64()
+                > *self.integer_histogram.unsafe_get_count_at_index(0)
             {
                 match self
                     .integer_histogram

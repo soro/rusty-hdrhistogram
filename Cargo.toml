@@ -12,6 +12,12 @@ edition = "2021"
 
 [dependencies]
 parking_lot = "0.12"
+zlib-rs = { version = "0.4", optional = true }
+base64 = { version = "0.22", optional = true }
+
+[features]
+encoding-compression = ["zlib-rs"]
+encoding-base64 = ["base64", "encoding-compression"]
 
 [dev-dependencies]
 rand = "0.8"

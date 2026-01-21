@@ -35,6 +35,8 @@ trait TestDoubleHistogram: Sized {
     fn get_current_highest_trackable_value(&self) -> f64;
     fn get_highest_to_lowest_value_ratio(&self) -> u64;
     fn get_number_of_significant_value_digits(&self) -> u8;
+    fn bucket_count(&self) -> u32;
+    fn counts_array_length(&self) -> u32;
     fn set_auto_resize(&mut self, auto_resize: bool);
     fn reset(&mut self);
     fn add(&mut self, other: &Self) -> Result<(), RecordError>;
@@ -117,6 +119,12 @@ impl TestDoubleHistogram for DoubleHistogram {
     }
     fn get_number_of_significant_value_digits(&self) -> u8 {
         DoubleHistogram::get_number_of_significant_value_digits(self)
+    }
+    fn bucket_count(&self) -> u32 {
+        DoubleHistogram::bucket_count(self)
+    }
+    fn counts_array_length(&self) -> u32 {
+        DoubleHistogram::counts_array_length(self)
     }
     fn set_auto_resize(&mut self, auto_resize: bool) {
         DoubleHistogram::set_auto_resize(self, auto_resize)
@@ -212,6 +220,12 @@ impl TestDoubleHistogram for ConcurrentDoubleHistogram {
     }
     fn get_number_of_significant_value_digits(&self) -> u8 {
         ConcurrentDoubleHistogram::get_number_of_significant_value_digits(self)
+    }
+    fn bucket_count(&self) -> u32 {
+        ConcurrentDoubleHistogram::bucket_count(self)
+    }
+    fn counts_array_length(&self) -> u32 {
+        ConcurrentDoubleHistogram::counts_array_length(self)
     }
     fn set_auto_resize(&mut self, auto_resize: bool) {
         ConcurrentDoubleHistogram::set_auto_resize(self, auto_resize)
@@ -351,10 +365,8 @@ fn record_value() {
 fn run_record_value_overflow_test<H: TestDoubleHistogram>() {
     let mut histogram =
         H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
-    assert!(histogram
-        .record_value(TRACKABLE_VALUE_RANGE_SIZE as f64 * 3.0)
-        .is_err());
-    succ!(histogram.record_value(1.0));
+    succ!(histogram.record_value(TRACKABLE_VALUE_RANGE_SIZE as f64 * 3.0));
+    assert!(histogram.record_value(1.0).is_err());
 }
 
 #[test]
@@ -708,20 +720,20 @@ fn get_mean() {
 
 fn run_get_std_deviation_test<H: TestDoubleHistogram>() {
     let data = build_data_histograms::<H>();
-    let expected_raw_mean = ((10000.0 * 1000.0) + (1.0 * 100000000.0)) / 10001.0;
-    let expected_raw_stddev = (((10000.0 * (1000.0 - expected_raw_mean).powi(2))
+    let expected_raw_mean: f64 = ((10000.0 * 1000.0) + (1.0 * 100000000.0)) / 10001.0;
+    let expected_raw_stddev: f64 = (((10000.0 * (1000.0 - expected_raw_mean).powi(2))
         + (100000000.0 - expected_raw_mean).powi(2))
         / 10001.0)
         .sqrt();
 
-    let expected_mean = (1000.0 + 50000000.0) / 2.0;
-    let mut expected_square_deviation_sum = 10000.0 * (1000.0 - expected_mean).powi(2);
-    let mut value = 10000.0;
+    let expected_mean: f64 = (1000.0 + 50000000.0) / 2.0;
+    let mut expected_square_deviation_sum: f64 = 10000.0 * (1000.0 - expected_mean).powi(2);
+    let mut value: f64 = 10000.0;
     while value <= 100000000.0 {
         expected_square_deviation_sum += (value - expected_mean).powi(2);
         value += 10000.0;
     }
-    let expected_stddev = (expected_square_deviation_sum / 20000.0).sqrt();
+    let expected_stddev: f64 = (expected_square_deviation_sum / 20000.0).sqrt();
 
     assert_approx_eq!(expected_raw_stddev, data.raw_histogram.get_std_deviation(), expected_raw_stddev * 0.001);
     assert_approx_eq!(expected_stddev, data.histogram.get_std_deviation(), expected_stddev * 0.001);
@@ -754,4 +766,69 @@ fn run_get_value_at_percentile_test<H: TestDoubleHistogram>() {
 fn get_value_at_percentile() {
     run_get_value_at_percentile_test::<DoubleHistogram>();
     run_get_value_at_percentile_test::<ConcurrentDoubleHistogram>();
+}
+
+fn run_get_value_at_percentile_examples_test<H: TestDoubleHistogram>() {
+    let mut histogram =
+        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    succ!(histogram.record_value(1.0));
+    succ!(histogram.record_value(2.0));
+    let value = histogram.get_value_at_percentile(50.0);
+    assert!(histogram.values_are_equivalent(1.0, value));
+    let value = histogram.get_value_at_percentile(50.00000000000001);
+    assert!(histogram.values_are_equivalent(1.0, value));
+    let value = histogram.get_value_at_percentile(50.0000000000001);
+    assert!(histogram.values_are_equivalent(2.0, value));
+
+    succ!(histogram.record_value(2.0));
+    succ!(histogram.record_value(2.0));
+    succ!(histogram.record_value(2.0));
+    let value = histogram.get_value_at_percentile(25.0);
+    assert!(histogram.values_are_equivalent(2.0, value));
+    let value = histogram.get_value_at_percentile(30.0);
+    assert!(histogram.values_are_equivalent(2.0, value));
+}
+
+#[test]
+fn get_value_at_percentile_examples() {
+    run_get_value_at_percentile_examples_test::<DoubleHistogram>();
+    run_get_value_at_percentile_examples_test::<ConcurrentDoubleHistogram>();
+}
+
+fn run_auto_sizing_edges_test<H: TestDoubleHistogram>() {
+    let mut histogram = H::new(3).unwrap();
+    succ!(histogram.record_value(1.0));
+    succ!(histogram.record_value((1_u64 << 48) as f64));
+    succ!(histogram.record_value(((1_u64 << 52) - 1) as f64));
+    assert_eq!(52, histogram.bucket_count());
+    assert_eq!(54272, histogram.counts_array_length());
+    succ!(histogram.record_value(((1_u64 << 53) - 1) as f64));
+    assert_eq!(53, histogram.bucket_count());
+    assert_eq!(55296, histogram.counts_array_length());
+
+    let mut histogram2 = H::new(2).unwrap();
+    succ!(histogram2.record_value(1.0));
+    succ!(histogram2.record_value((1_u64 << 48) as f64));
+    succ!(histogram2.record_value(((1_u64 << 54) - 1) as f64));
+    assert_eq!(55, histogram2.bucket_count());
+    assert_eq!(7168, histogram2.counts_array_length());
+    succ!(histogram2.record_value(((1_u64 << 55) - 1) as f64));
+    assert_eq!(56, histogram2.bucket_count());
+    assert_eq!(7296, histogram2.counts_array_length());
+
+    let mut histogram3 = H::new(2).unwrap();
+    succ!(histogram3.record_value(1.0e50));
+    succ!(histogram3.record_value((1_u64 << 48) as f64 * 1.0e50));
+    succ!(histogram3.record_value(((1_u64 << 54) - 1) as f64 * 1.0e50));
+    assert_eq!(55, histogram3.bucket_count());
+    assert_eq!(7168, histogram3.counts_array_length());
+    succ!(histogram3.record_value(((1_u64 << 55) - 1) as f64 * 1.0e50));
+    assert_eq!(56, histogram3.bucket_count());
+    assert_eq!(7296, histogram3.counts_array_length());
+}
+
+#[test]
+fn auto_sizing_edges() {
+    run_auto_sizing_edges_test::<DoubleHistogram>();
+    run_auto_sizing_edges_test::<ConcurrentDoubleHistogram>();
 }
