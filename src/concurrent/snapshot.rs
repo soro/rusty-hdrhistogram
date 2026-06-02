@@ -1,6 +1,6 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
-use crate::concurrent::static_histogram::StaticHistogram;
+use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::core::{EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram, ReadableHistogram};
 use crate::iteration::*;
 
@@ -64,6 +64,8 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
     }
 }
 
+impl<'a, T: RecordableHistogram> crate::core::readable_histogram::sealed::Sealed for Snapshot<'a, T> {}
+
 impl<'a, T: RecordableHistogram> ReadableHistogram for Snapshot<'a, T> {
     fn settings(&self) -> HistogramSettings {
         self.0.settings()
@@ -94,7 +96,7 @@ impl<'a, T: RecordableHistogram> ReadableHistogram for Snapshot<'a, T> {
 
 impl<'a, T: RecordableHistogram> IterableHistogram for Snapshot<'a, T> {}
 
-pub struct StaticSnapshot<'a>(Snapshot<'a, StaticHistogram>);
+pub struct FixedSnapshot<'a>(Snapshot<'a, FixedConcurrentHistogram>);
 
 pub struct ResizableSnapshot<'a>(Snapshot<'a, ResizableConcurrentHistogram>);
 
@@ -166,6 +168,8 @@ macro_rules! impl_snapshot_wrapper {
             }
         }
 
+        impl<'a> crate::core::readable_histogram::sealed::Sealed for $snapshot<'a> {}
+
         impl<'a> ReadableHistogram for $snapshot<'a> {
             fn settings(&self) -> HistogramSettings {
                 self.0.settings()
@@ -206,5 +210,5 @@ macro_rules! impl_snapshot_wrapper {
     };
 }
 
-impl_snapshot_wrapper!(StaticSnapshot, StaticHistogram);
+impl_snapshot_wrapper!(FixedSnapshot, FixedConcurrentHistogram);
 impl_snapshot_wrapper!(ResizableSnapshot, ResizableConcurrentHistogram);

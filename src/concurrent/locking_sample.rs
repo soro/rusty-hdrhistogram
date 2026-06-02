@@ -1,15 +1,15 @@
-use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramImpl, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
+use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramWithPolicy, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::recorder::{DoubleRecorder, Recorder, SingleWriterDoubleRecorder, SingleWriterRecorder};
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
-use crate::concurrent::snapshot::{ResizableSnapshot, Snapshot, StaticSnapshot};
-use crate::concurrent::static_histogram::StaticHistogram;
+use crate::concurrent::snapshot::{FixedSnapshot, ResizableSnapshot, Snapshot};
+use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::concurrent::writer_reader_phaser::PhaseFlipGuard;
 use crate::core::OverflowPolicy;
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
 };
-use crate::st::{DoubleHistogramImpl, Histogram};
+use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -38,12 +38,12 @@ impl<'a, 'b: 'a, T: RecordableHistogram> LockingSample<'a, 'b, T> {
         }
     }
 
-    pub(crate) fn histogram(&self) -> Snapshot<'_, T> {
+    pub(crate) fn snapshot(&self) -> Snapshot<'_, T> {
         unsafe { Snapshot::new(&*self.histogram.load(Ordering::Acquire)) }
     }
 }
 
-pub struct StaticLockingSample<'a, 'b: 'a>(LockingSample<'a, 'b, StaticHistogram>);
+pub struct FixedLockingSample<'a, 'b: 'a>(LockingSample<'a, 'b, FixedConcurrentHistogram>);
 
 pub struct ResizableLockingSample<'a, 'b: 'a>(LockingSample<'a, 'b, ResizableConcurrentHistogram>);
 
@@ -58,22 +58,15 @@ macro_rules! impl_locking_sample_wrapper {
                 $sample(self.0.resample())
             }
 
-            pub fn histogram(&self) -> $snapshot<'_> {
-                $snapshot::new(self.0.histogram())
-            }
-
             /// Return a read-only snapshot of the most recently sampled histogram.
-            ///
-            /// This is an alias for [`histogram`](Self::histogram) with a name
-            /// that better reflects the returned type.
             pub fn snapshot(&self) -> $snapshot<'_> {
-                self.histogram()
+                $snapshot::new(self.0.snapshot())
             }
         }
     };
 }
 
-impl_locking_sample_wrapper!(StaticLockingSample, StaticHistogram, StaticSnapshot);
+impl_locking_sample_wrapper!(FixedLockingSample, FixedConcurrentHistogram, FixedSnapshot);
 impl_locking_sample_wrapper!(ResizableLockingSample, ResizableConcurrentHistogram, ResizableSnapshot);
 
 impl<'a, 'b: 'a, T: RecordableHistogram> Drop for LockingSample<'a, 'b, T> {
@@ -87,14 +80,14 @@ impl<'a, 'b: 'a, T: RecordableHistogram> Drop for LockingSample<'a, 'b, T> {
 
 pub struct DoubleLockingSample<'a, 'b: 'a, P: OverflowPolicy> {
     parent_recorder: &'a DoubleRecorder<P>,
-    histogram: AtomicPtr<ConcurrentDoubleHistogramImpl<P>>,
+    histogram: AtomicPtr<ConcurrentDoubleHistogramWithPolicy<P>>,
     guard: PhaseFlipGuard<'b>,
 }
 
 impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
     pub(in crate::concurrent) fn new(
         parent_recorder: &'a DoubleRecorder<P>,
-        histogram: *mut ConcurrentDoubleHistogramImpl<P>,
+        histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
         DoubleLockingSample {
@@ -114,20 +107,12 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
         }
     }
 
-    fn raw_histogram(&self) -> &ConcurrentDoubleHistogramImpl<P> {
+    fn raw_histogram(&self) -> &ConcurrentDoubleHistogramWithPolicy<P> {
         unsafe { &*self.histogram.load(Ordering::Acquire) }
     }
 
-    pub fn histogram(&self) -> ConcurrentDoubleSnapshot<'_, P> {
-        ConcurrentDoubleSnapshot::new(self.raw_histogram())
-    }
-
-    /// Return a read-only snapshot of the most recently sampled histogram.
-    ///
-    /// This is an alias for [`histogram`](Self::histogram) with the same naming
-    /// convention as the integer recorder sample types.
     pub fn snapshot(&self) -> ConcurrentDoubleSnapshot<'_, P> {
-        self.histogram()
+        ConcurrentDoubleSnapshot::new(self.raw_histogram())
     }
 
     pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
@@ -167,14 +152,14 @@ impl<'a, 'b: 'a, P: OverflowPolicy> Drop for DoubleLockingSample<'a, 'b, P> {
 
 pub struct SingleWriterLockingSample<'a, 'b: 'a> {
     parent_recorder: &'a SingleWriterRecorder,
-    histogram: AtomicPtr<Histogram<u64>>,
+    histogram: AtomicPtr<Histogram>,
     guard: PhaseFlipGuard<'b>,
 }
 
 impl<'a, 'b: 'a> SingleWriterLockingSample<'a, 'b> {
     pub(in crate::concurrent) fn new(
         parent_recorder: &'a SingleWriterRecorder,
-        histogram: *mut Histogram<u64>,
+        histogram: *mut Histogram,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
         SingleWriterLockingSample {
@@ -194,16 +179,13 @@ impl<'a, 'b: 'a> SingleWriterLockingSample<'a, 'b> {
         }
     }
 
-    pub fn histogram(&self) -> &Histogram<u64> {
+    fn raw_histogram(&self) -> &Histogram {
         unsafe { &*self.histogram.load(Ordering::Acquire) }
     }
 
     /// Return a read-only view of the most recently sampled histogram.
-    ///
-    /// This is an alias for [`histogram`](Self::histogram) with the same naming
-    /// convention as the concurrent recorder sample types.
-    pub fn snapshot(&self) -> &Histogram<u64> {
-        self.histogram()
+    pub fn snapshot(&self) -> &Histogram {
+        self.raw_histogram()
     }
 }
 
@@ -218,14 +200,14 @@ impl<'a, 'b: 'a> Drop for SingleWriterLockingSample<'a, 'b> {
 
 pub struct SingleWriterDoubleLockingSample<'a, 'b: 'a, P: OverflowPolicy> {
     parent_recorder: &'a SingleWriterDoubleRecorder<P>,
-    histogram: AtomicPtr<DoubleHistogramImpl<P>>,
+    histogram: AtomicPtr<DoubleHistogramWithPolicy<P>>,
     guard: PhaseFlipGuard<'b>,
 }
 
 impl<'a, 'b: 'a, P: OverflowPolicy> SingleWriterDoubleLockingSample<'a, 'b, P> {
     pub(in crate::concurrent) fn new(
         parent_recorder: &'a SingleWriterDoubleRecorder<P>,
-        histogram: *mut DoubleHistogramImpl<P>,
+        histogram: *mut DoubleHistogramWithPolicy<P>,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
         SingleWriterDoubleLockingSample {
@@ -245,16 +227,13 @@ impl<'a, 'b: 'a, P: OverflowPolicy> SingleWriterDoubleLockingSample<'a, 'b, P> {
         }
     }
 
-    pub fn histogram(&self) -> &DoubleHistogramImpl<P> {
+    fn raw_histogram(&self) -> &DoubleHistogramWithPolicy<P> {
         unsafe { &*self.histogram.load(Ordering::Acquire) }
     }
 
     /// Return a read-only view of the most recently sampled histogram.
-    ///
-    /// This is an alias for [`histogram`](Self::histogram) with the same naming
-    /// convention as the concurrent recorder sample types.
-    pub fn snapshot(&self) -> &DoubleHistogramImpl<P> {
-        self.histogram()
+    pub fn snapshot(&self) -> &DoubleHistogramWithPolicy<P> {
+        self.raw_histogram()
     }
 }
 

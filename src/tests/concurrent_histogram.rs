@@ -1,4 +1,6 @@
-use crate::concurrent::{ConcurrentDoubleHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram, StaticHistogram};
+use crate::concurrent::{
+    ConcurrentDoubleHistogram, FixedConcurrentHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram,
+};
 use crate::core::RecordError;
 use crate::iteration::IterationError;
 use parking_lot::RwLock;
@@ -19,11 +21,33 @@ fn concurrent_record_value_overflow_throws() {
         Err(RecordError::ValueOutOfRangeResizeDisabled)
     ));
 
-    let static_histogram = StaticHistogram::with_low_high_sigvdig(1, highest, 2).unwrap();
+    let static_histogram = FixedConcurrentHistogram::with_low_high_sigvdig(1, highest, 2).unwrap();
     assert!(matches!(
         static_histogram.record_value(highest * 3),
         Err(RecordError::ValueOutOfRangeResizeDisabled)
     ));
+}
+
+#[test]
+fn concurrent_histogram_builders_construct_expected_variants() {
+    let fixed = FixedConcurrentHistogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(1_024)
+        .build()
+        .unwrap();
+    succ!(fixed.record_value(512));
+    assert_eq!(1, fixed.get_total_count());
+    assert!(!fixed.is_auto_resize());
+
+    let resizable = ResizableConcurrentHistogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(2)
+        .auto_resize(true)
+        .build()
+        .unwrap();
+    succ!(resizable.record_value(1_024));
+    assert_eq!(1, resizable.get_total_count());
+    assert!(resizable.settings().highest_trackable_value >= 1_024);
 }
 
 #[test]

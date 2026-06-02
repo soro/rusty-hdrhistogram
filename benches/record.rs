@@ -7,9 +7,9 @@ mod common;
 use criterion::{criterion_group, criterion_main, Criterion};
 use hdrhistogram::concurrent::recorder;
 use hdrhistogram::concurrent::{
-    ConcurrentDoubleHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram, StaticHistogram,
+    ConcurrentDoubleHistogram, FixedConcurrentHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram,
 };
-use hdrhistogram::st::{DoubleHistogram, Histogram, SaturatingDoubleHistogram};
+use hdrhistogram::st::{DoubleHistogram, Histogram, HistogramWithCounter, SaturatingDoubleHistogram};
 use rand::Rng;
 use std::hint::black_box;
 
@@ -38,8 +38,7 @@ fn next_mostly_clamped_value(values: &[f64], i: &mut usize) -> f64 {
 
 fn record_value_histogram_u64(c: &mut Criterion) {
     c.bench_function("record_value_histogram_u64", |b| {
-        let mut histogram =
-            Histogram::<u64>::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let mut histogram = Histogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -52,7 +51,8 @@ fn record_value_histogram_u64(c: &mut Criterion) {
 fn record_value_histogram_u32(c: &mut Criterion) {
     c.bench_function("record_value_histogram_u32", |b| {
         let mut histogram =
-            Histogram::<u32>::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+            HistogramWithCounter::<u32>::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS)
+                .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -62,10 +62,10 @@ fn record_value_histogram_u32(c: &mut Criterion) {
     });
 }
 
-fn record_value_static_concurrent_histogram(c: &mut Criterion) {
-    c.bench_function("record_value_static_concurrent_histogram", |b| {
+fn record_value_fixed_concurrent_histogram(c: &mut Criterion) {
+    c.bench_function("record_value_fixed_concurrent_histogram", |b| {
         let histogram =
-            StaticHistogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+            FixedConcurrentHistogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -89,10 +89,9 @@ fn record_value_resizable_concurrent_histogram(c: &mut Criterion) {
     });
 }
 
-fn record_value_static_recorder(c: &mut Criterion) {
-    c.bench_function("record_value_static_recorder", |b| {
-        let recorder =
-            recorder::static_with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+fn record_value_fixed_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_fixed_recorder", |b| {
+        let recorder = recorder::fixed_with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -376,7 +375,7 @@ fn record_mostly_clamped_saturating_single_writer_double_recorder(c: &mut Criter
 
 fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
     c.bench_function("record_precalc_random_values_with_1_count_u64", |b| {
-        let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
         let mut values = Vec::<u64>::new();
         let mut rng = rand::thread_rng();
 
@@ -394,7 +393,7 @@ fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
 
 fn bench_percentile(c: &mut Criterion) {
     c.bench_function("bench_percentile", |b| {
-        let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
         let mut indices = Vec::<u64>::new();
         let mut rng = rand::thread_rng();
 
@@ -416,7 +415,7 @@ fn bench_percentile(c: &mut Criterion) {
 
 fn percentile_iter(c: &mut Criterion) {
     c.bench_function("percentile_iter", |b| {
-        let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
         let length = 1000000;
 
         for value in 1..=length {
@@ -436,9 +435,9 @@ criterion_group!(
     benches,
     record_value_histogram_u64,
     record_value_histogram_u32,
-    record_value_static_concurrent_histogram,
+    record_value_fixed_concurrent_histogram,
     record_value_resizable_concurrent_histogram,
-    record_value_static_recorder,
+    record_value_fixed_recorder,
     record_value_resizable_recorder,
     record_value_single_writer_recorder,
     record_value_double_histogram,

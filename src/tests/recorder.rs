@@ -1,6 +1,6 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::recorder;
-use crate::concurrent::{ResizableConcurrentHistogram, ResizableRecorder, StaticRecorder};
+use crate::concurrent::{FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder};
 use crate::core::constants::ORIGINAL_MIN;
 use crate::core::*;
 use rand::Rng;
@@ -19,7 +19,7 @@ fn resizing_recorder() {
 
 #[test]
 fn static_recorder() {
-    let recorder = Arc::new(recorder::static_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
+    let recorder = Arc::new(recorder::fixed_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
     run_static_recorder_test(recorder);
 }
 
@@ -31,9 +31,9 @@ fn double_recorder_records_and_resamples() {
     succ!(recorder.record_value_with_count(12.0, 2));
 
     let mut sample = recorder.locking_sample();
-    assert_eq!(3, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(1.5));
-    assert_eq!(2, sample.histogram().get_count_at_value(12.0));
+    assert_eq!(3, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(1.5));
+    assert_eq!(2, sample.snapshot().get_count_at_value(12.0));
     let recorded_count = {
         let mut recorded_values = sample.recorded_values();
         let mut recorded_count = 0;
@@ -46,8 +46,8 @@ fn double_recorder_records_and_resamples() {
 
     succ!(recorder.record_value(24.0));
     sample = sample.resample();
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(24.0));
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(24.0));
 }
 
 #[test]
@@ -56,14 +56,14 @@ fn double_recorder_interval_timestamps_are_contiguous() {
 
     succ!(recorder.record_value(1.5));
     let mut sample = recorder.locking_sample();
-    let first_start = sample.histogram().meta_data().start_timestamp.unwrap();
-    let first_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    let first_start = sample.snapshot().meta_data().start_timestamp.unwrap();
+    let first_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert!(first_end >= first_start);
 
     succ!(recorder.record_value(2.5));
     sample = sample.resample();
-    let second_start = sample.histogram().meta_data().start_timestamp.unwrap();
-    let second_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    let second_start = sample.snapshot().meta_data().start_timestamp.unwrap();
+    let second_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert_eq!(first_end, second_start);
     assert!(second_end >= second_start);
 }
@@ -74,13 +74,13 @@ fn double_recorder_preserves_counts_across_conversion_ratio_changes() {
 
     succ!(recorder.record_value(1.0));
     let mut sample = recorder.locking_sample();
-    assert_eq!(1, sample.histogram().get_count_at_value(1.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(1.0));
 
     succ!(recorder.record_value(1_000_000.0));
     sample = sample.resample();
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(1_000_000.0));
-    assert!(sample.histogram().get_current_highest_trackable_value() > 1_000_000.0);
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(1_000_000.0));
+    assert!(sample.snapshot().get_current_highest_trackable_value() > 1_000_000.0);
 }
 
 #[test]
@@ -89,14 +89,14 @@ fn double_recorder_snapshot_is_stable_after_resample() {
 
     succ!(recorder.record_value_with_expected_interval(100.0, 25.0));
     let mut sample = recorder.locking_sample();
-    assert_eq!(4, sample.histogram().get_total_count());
+    assert_eq!(4, sample.snapshot().get_total_count());
 
     succ!(recorder.record_value(200.0));
-    let first_total = sample.histogram().get_total_count();
+    let first_total = sample.snapshot().get_total_count();
     sample = sample.resample();
     assert_eq!(4, first_total);
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(200.0));
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(200.0));
 }
 
 #[test]
@@ -109,19 +109,19 @@ fn single_writer_recorder_records_and_resamples() {
 
     let mut sample = recorder.locking_sample();
     assert_eq!(7, sample.snapshot().get_total_count());
-    assert_eq!(Some(2), sample.histogram().get_count_at_value(100));
-    assert_eq!(Some(2), sample.histogram().get_count_at_value(1_000));
-    assert_eq!(Some(1), sample.histogram().get_count_at_value(400));
-    assert_eq!(Some(1), sample.histogram().get_count_at_value(300));
-    assert_eq!(Some(1), sample.histogram().get_count_at_value(200));
-    assert!(sample.histogram().meta_data.end_timestamp.is_some());
+    assert_eq!(Some(2), sample.snapshot().get_count_at_value(100));
+    assert_eq!(Some(2), sample.snapshot().get_count_at_value(1_000));
+    assert_eq!(Some(1), sample.snapshot().get_count_at_value(400));
+    assert_eq!(Some(1), sample.snapshot().get_count_at_value(300));
+    assert_eq!(Some(1), sample.snapshot().get_count_at_value(200));
+    assert!(sample.snapshot().meta_data.end_timestamp.is_some());
 
     succ!(recorder.record_value(500));
-    let first_total = sample.histogram().get_total_count();
+    let first_total = sample.snapshot().get_total_count();
     sample = sample.resample();
     assert_eq!(7, first_total);
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(Some(1), sample.histogram().get_count_at_value(500));
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(Some(1), sample.snapshot().get_count_at_value(500));
 }
 
 #[test]
@@ -130,14 +130,14 @@ fn single_writer_recorder_interval_timestamps_are_contiguous() {
 
     succ!(recorder.record_value(100));
     let mut sample = recorder.locking_sample();
-    let first_start = sample.histogram().meta_data.start_timestamp.unwrap();
-    let first_end = sample.histogram().meta_data.end_timestamp.unwrap();
+    let first_start = sample.snapshot().meta_data.start_timestamp.unwrap();
+    let first_end = sample.snapshot().meta_data.end_timestamp.unwrap();
     assert!(first_end >= first_start);
 
     succ!(recorder.record_value(200));
     sample = sample.resample();
-    let second_start = sample.histogram().meta_data.start_timestamp.unwrap();
-    let second_end = sample.histogram().meta_data.end_timestamp.unwrap();
+    let second_start = sample.snapshot().meta_data.start_timestamp.unwrap();
+    let second_end = sample.snapshot().meta_data.end_timestamp.unwrap();
     assert_eq!(first_end, second_start);
     assert!(second_end >= second_start);
 }
@@ -148,14 +148,14 @@ fn single_writer_double_recorder_interval_timestamps_are_contiguous() {
 
     succ!(recorder.record_value(1.5));
     let mut sample = recorder.locking_sample();
-    let first_start = sample.histogram().integer_histogram().meta_data.start_timestamp.unwrap();
-    let first_end = sample.histogram().integer_histogram().meta_data.end_timestamp.unwrap();
+    let first_start = sample.snapshot().integer_histogram().meta_data.start_timestamp.unwrap();
+    let first_end = sample.snapshot().integer_histogram().meta_data.end_timestamp.unwrap();
     assert!(first_end >= first_start);
 
     succ!(recorder.record_value(2.5));
     sample = sample.resample();
-    let second_start = sample.histogram().integer_histogram().meta_data.start_timestamp.unwrap();
-    let second_end = sample.histogram().integer_histogram().meta_data.end_timestamp.unwrap();
+    let second_start = sample.snapshot().integer_histogram().meta_data.start_timestamp.unwrap();
+    let second_end = sample.snapshot().integer_histogram().meta_data.end_timestamp.unwrap();
     assert_eq!(first_end, second_start);
     assert!(second_end >= second_start);
 }
@@ -167,8 +167,8 @@ fn single_writer_recorder_constructor_auto_resizes() {
     succ!(recorder.record_value(HIGHEST_TRACKABLE));
     let sample = recorder.locking_sample();
 
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert!(sample.histogram().get_highest_trackable_value() >= HIGHEST_TRACKABLE);
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert!(sample.snapshot().get_highest_trackable_value() >= HIGHEST_TRACKABLE);
 }
 
 #[test]
@@ -197,14 +197,14 @@ fn single_writer_recorder_can_sample_while_single_writer_runs() {
     let mut sample = recorder.locking_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
-        sampled_count += sample.histogram().get_total_count();
+        sampled_count += sample.snapshot().get_total_count();
         sample = sample.resample();
         thread::yield_now();
     }
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
     writer.join().unwrap();
     sample = sample.resample();
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
 
     assert_eq!(ITERATIONS as u64, sampled_count);
 }
@@ -219,17 +219,17 @@ fn single_writer_double_recorder_records_and_resamples() {
 
     let mut sample = recorder.locking_sample();
     assert_eq!(7, sample.snapshot().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(1.5));
-    assert_eq!(2, sample.histogram().get_count_at_value(12.0));
-    assert_eq!(1, sample.histogram().get_count_at_value(100.0));
-    assert_eq!(1, sample.histogram().get_count_at_value(75.0));
-    assert_eq!(1, sample.histogram().get_count_at_value(50.0));
-    assert_eq!(1, sample.histogram().get_count_at_value(25.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(1.5));
+    assert_eq!(2, sample.snapshot().get_count_at_value(12.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(100.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(75.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(50.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(25.0));
 
     succ!(recorder.record_value(24.0));
     sample = sample.resample();
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(24.0));
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(24.0));
 }
 
 #[test]
@@ -258,14 +258,14 @@ fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
     let mut sample = recorder.locking_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
-        sampled_count += sample.histogram().get_total_count();
+        sampled_count += sample.snapshot().get_total_count();
         sample = sample.resample();
         thread::yield_now();
     }
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
     writer.join().unwrap();
     sample = sample.resample();
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
 
     assert_eq!(ITERATIONS as u64, sampled_count);
 }
@@ -276,12 +276,12 @@ fn single_writer_double_recorder_preserves_shifted_range_across_samples() {
 
     succ!(recorder.record_value(1_000_000.0));
     let mut sample = recorder.locking_sample();
-    assert_eq!(1, sample.histogram().get_count_at_value(1_000_000.0));
+    assert_eq!(1, sample.snapshot().get_count_at_value(1_000_000.0));
 
     succ!(recorder.record_value(1_000_000.0));
     sample = sample.resample();
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert_eq!(1, sample.histogram().get_count_at_value(1_000_000.0));
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert_eq!(1, sample.snapshot().get_count_at_value(1_000_000.0));
 }
 
 #[test]
@@ -291,8 +291,8 @@ fn saturating_single_writer_double_recorder_clamps_out_of_range_values() {
     succ!(recorder.record_value(f64::MAX));
     let sample = recorder.locking_sample();
 
-    assert_eq!(1, sample.histogram().get_total_count());
-    assert!(sample.histogram().get_max_value() < f64::MAX);
+    assert_eq!(1, sample.snapshot().get_total_count());
+    assert!(sample.snapshot().get_max_value() < f64::MAX);
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn recorder_resample_resets_tracking() {
     sample = sample.resample();
 
     {
-        let snapshot = sample.histogram();
+        let snapshot = sample.snapshot();
         assert_eq!(snapshot.get_total_count(), 1);
         assert_eq!(snapshot.get_min_non_zero_value(), 500);
         let expected_max = snapshot.settings().highest_equivalent_value(500);
@@ -349,14 +349,14 @@ fn recorder_resample_does_not_lose_concurrent_counts() {
     let mut sample = recorder.locking_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
-        sampled_count += sample.histogram().get_total_count();
+        sampled_count += sample.snapshot().get_total_count();
         sample = sample.resample();
         thread::yield_now();
     }
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
     writer.join().unwrap();
     sample = sample.resample();
-    sampled_count += sample.histogram().get_total_count();
+    sampled_count += sample.snapshot().get_total_count();
 
     assert_eq!(ITERATIONS as u64, sampled_count);
 }
@@ -387,14 +387,14 @@ fn concurrent_recorder_interval_timestamps_are_contiguous() {
 
     succ!(recorder.record_value(100));
     let mut sample = recorder.locking_sample();
-    let first_start = sample.histogram().meta_data().start_timestamp.unwrap();
-    let first_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    let first_start = sample.snapshot().meta_data().start_timestamp.unwrap();
+    let first_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert!(first_end >= first_start);
 
     succ!(recorder.record_value(200));
     sample = sample.resample();
-    let second_start = sample.histogram().meta_data().start_timestamp.unwrap();
-    let second_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    let second_start = sample.snapshot().meta_data().start_timestamp.unwrap();
+    let second_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert_eq!(first_end, second_start);
     assert!(second_end >= second_start);
 }
@@ -451,12 +451,12 @@ macro_rules! recorder_test {
                     let mut sample = recorder_c.locking_sample();
                     loop {
                         let total_sample_value = sample
-                            .histogram()
+                            .snapshot()
                             .recorded_values()
                             .last()
                             .map(|v| v.total_value_to_this_value)
                             .unwrap_or(0);
-                        sampled_total_count.fetch_add(sample.histogram().get_total_count() as usize, Ordering::Relaxed);
+                        sampled_total_count.fetch_add(sample.snapshot().get_total_count() as usize, Ordering::Relaxed);
                         sampled_total_value.fetch_add(total_sample_value as usize, Ordering::Relaxed);
                         let flag = keep_sampling.load(Ordering::Acquire);
                         if !flag {
@@ -478,7 +478,7 @@ macro_rules! recorder_test {
             keep_sampling.store(false, Ordering::SeqCst);
 
             let sample = recorder.locking_sample();
-            let total_count = sample.histogram().get_total_count() as usize + sampled_total_count.load(Ordering::Relaxed);
+            let total_count = sample.snapshot().get_total_count() as usize + sampled_total_count.load(Ordering::Relaxed);
             assert_eq!(total_count, (THREAD_COUNT * NUM_VALS) as usize);
 
             let total = values
@@ -486,7 +486,7 @@ macro_rules! recorder_test {
                 .fold(0_u64, |acc, vec| acc + vec.iter().fold(0, |acc, v| acc + *v as u64));
 
             let observed_value = sample
-                .histogram()
+                .snapshot()
                 .recorded_values()
                 .last()
                 .map(|v| v.total_value_to_this_value as usize)
@@ -499,4 +499,4 @@ macro_rules! recorder_test {
 }
 
 recorder_test!(run_resizable_recorder_test, ResizableRecorder);
-recorder_test!(run_static_recorder_test, StaticRecorder);
+recorder_test!(run_static_recorder_test, FixedRecorder);

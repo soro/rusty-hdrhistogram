@@ -30,7 +30,7 @@ fn write_temp_input(test_name: &str, contents: &str) -> PathBuf {
 }
 
 fn sample_log() -> String {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
     format!(
         "{}{}",
@@ -40,9 +40,9 @@ fn sample_log() -> String {
 }
 
 fn tagged_log() -> String {
-    let mut untagged = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut untagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     untagged.record_value_with_count(100, 2).unwrap();
-    let mut tagged = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut tagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     tagged.record_value_with_count(1_000, 7).unwrap();
     tagged.meta_data.set_tag_string("phase-a".to_string());
     format!(

@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![allow(private_bounds)]
 #![recursion_limit = "128"]
 
 //! Rust port of HdrHistogram with integer, double, concurrent recorder, and
@@ -10,7 +9,11 @@
 //! ```
 //! use hdrhistogram::Histogram;
 //!
-//! let mut histogram = Histogram::<u64>::with_high_sigvdig(60_000, 3).unwrap();
+//! let mut histogram = Histogram::builder()
+//!     .significant_digits(3)
+//!     .highest_trackable_value(60_000)
+//!     .build()
+//!     .unwrap();
 //! histogram.record_value(42).unwrap();
 //! assert_eq!(histogram.get_total_count(), 1);
 //! ```
@@ -34,18 +37,22 @@ pub mod iteration;
 pub mod st;
 
 pub use crate::concurrent::{
-    ConcurrentDoubleHistogram, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot, DoubleLockingSample, DoubleRecorder,
-    ResizableConcurrentHistogram, ResizableConcurrentReadView, ResizableLockingSample, ResizableRecorder, ResizableSnapshot,
-    SaturatingConcurrentDoubleHistogram, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleLockingSample,
-    SingleWriterDoubleRecorder, SingleWriterLockingSample, SingleWriterRecorder, StaticHistogram, StaticLockingSample, StaticRecorder,
-    StaticSnapshot,
+    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramBuilder, ConcurrentDoubleHistogramWithPolicy, ConcurrentDoubleReadView,
+    ConcurrentDoubleSnapshot, DoubleLockingSample, DoubleRecorder, FixedConcurrentHistogram, FixedConcurrentHistogramBuilder,
+    FixedLockingSample, FixedRecorder, FixedSnapshot, ResizableConcurrentHistogram, ResizableConcurrentHistogramBuilder,
+    ResizableConcurrentReadView, ResizableLockingSample, ResizableRecorder, ResizableSnapshot, SaturatingConcurrentDoubleHistogram,
+    SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleLockingSample, SingleWriterDoubleRecorder,
+    SingleWriterLockingSample, SingleWriterRecorder,
 };
 pub use crate::core::{
     Counter, CreationError, DoubleCreationError, EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram,
     OverflowPolicy, RecordError, SaturateOnOverflow, ShiftError, SubtractionError, ThrowOnOverflow,
 };
 pub use crate::iteration::IterationError;
-pub use crate::st::{DoubleHistogram, DoubleHistogramImpl, Histogram, SaturatingDoubleHistogram};
+pub use crate::st::{
+    DoubleHistogram, DoubleHistogramBuilder, DoubleHistogramWithPolicy, Histogram, HistogramBuilder, HistogramWithCounter,
+    SaturatingDoubleHistogram,
+};
 
 #[cfg(test)]
 pub mod tests;

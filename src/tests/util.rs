@@ -12,8 +12,8 @@ macro_rules! assert_approx_eq {
     };
 }
 
-pub fn stat_histo() -> Histogram<u64> {
-    let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, 3600 * 1000 * 1000, 3).unwrap();
+pub fn stat_histo() -> Histogram {
+    let mut histogram = Histogram::with_low_high_sigvdig(1, 3600 * 1000 * 1000, 3).unwrap();
     for _ in 0..10000 {
         histogram.record_value_with_expected_interval(1000, 10000).unwrap();
     }
@@ -21,8 +21,8 @@ pub fn stat_histo() -> Histogram<u64> {
     histogram
 }
 
-pub fn raw_stat_histo() -> Histogram<u64> {
-    let mut histogram = Histogram::<u64>::with_low_high_sigvdig(1, 3600 * 1000 * 1000, 3).unwrap();
+pub fn raw_stat_histo() -> Histogram {
+    let mut histogram = Histogram::with_low_high_sigvdig(1, 3600 * 1000 * 1000, 3).unwrap();
     for _ in 0..10000 {
         histogram.record_value(1000).unwrap();
     }

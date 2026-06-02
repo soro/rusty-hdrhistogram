@@ -1,14 +1,16 @@
-use crate::concurrent::double_histogram::{ConcurrentDoubleHistogram, ConcurrentDoubleHistogramImpl, SaturatingConcurrentDoubleHistogram};
+use crate::concurrent::double_histogram::{
+    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramWithPolicy, SaturatingConcurrentDoubleHistogram,
+};
 use crate::concurrent::locking_sample::{
-    DoubleLockingSample, LockingSample, ResizableLockingSample, SingleWriterDoubleLockingSample, SingleWriterLockingSample,
-    StaticLockingSample,
+    DoubleLockingSample, FixedLockingSample, LockingSample, ResizableLockingSample, SingleWriterDoubleLockingSample,
+    SingleWriterLockingSample,
 };
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
-use crate::concurrent::static_histogram::StaticHistogram;
+use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::*;
-use crate::st::{DoubleHistogramImpl, Histogram};
+use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::time::SystemTime;
@@ -28,8 +30,8 @@ pub(crate) struct RecorderCore<T> {
     active_histogram: AtomicPtr<T>,
 }
 
-pub struct StaticRecorder {
-    inner: Recorder<StaticHistogram>,
+pub struct FixedRecorder {
+    inner: Recorder<FixedConcurrentHistogram>,
 }
 
 pub struct ResizableRecorder {
@@ -43,7 +45,7 @@ pub struct ResizableRecorder {
 /// writer; this is intentional for the single-writer variant.
 pub struct SingleWriterRecorder {
     instance_id: usize,
-    core: SingleWriterCore<Histogram<u64>>,
+    core: SingleWriterCore<Histogram>,
     inactive_settings: HistogramSettings,
     inactive_integer_to_double_value_conversion_ratio: f64,
 }
@@ -53,7 +55,7 @@ pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorder<Satur
 
 pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
     instance_id: usize,
-    core: RecorderCore<ConcurrentDoubleHistogramImpl<P>>,
+    core: RecorderCore<ConcurrentDoubleHistogramWithPolicy<P>>,
 }
 
 /// Double recorder optimized for exactly one recording thread plus optional sampling.
@@ -63,19 +65,19 @@ pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
 /// writer; this is intentional for the single-writer variant.
 pub struct SingleWriterDoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
     instance_id: usize,
-    core: SingleWriterCore<DoubleHistogramImpl<P>>,
+    core: SingleWriterCore<DoubleHistogramWithPolicy<P>>,
     inactive_highest_to_lowest_value_ratio: u64,
     inactive_number_of_significant_value_digits: u8,
     inactive_auto_resize: bool,
 }
 
-pub fn static_with_low_high_sigvdig(
+pub fn fixed_with_low_high_sigvdig(
     lowest_discernible_value: u64,
     highest_trackable_value: u64,
     significant_value_digits: u8,
-) -> Result<StaticRecorder, CreationError> {
-    StaticHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
-        .map(StaticRecorder::from_histogram)
+) -> Result<FixedRecorder, CreationError> {
+    FixedConcurrentHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
+        .map(FixedRecorder::from_histogram)
 }
 
 pub fn resizable_with_low_high_sigvdig(
@@ -408,18 +410,18 @@ macro_rules! impl_integer_recorder {
     };
 }
 
-impl_integer_recorder!(StaticRecorder, StaticHistogram, StaticLockingSample);
+impl_integer_recorder!(FixedRecorder, FixedConcurrentHistogram, FixedLockingSample);
 impl_integer_recorder!(ResizableRecorder, ResizableConcurrentHistogram, ResizableLockingSample);
 
 impl SingleWriterRecorder {
     pub fn new(significant_value_digits: u8) -> Result<Self, CreationError> {
-        let mut histogram = Histogram::<u64>::new(significant_value_digits)?;
+        let mut histogram = Histogram::new(significant_value_digits)?;
         histogram.set_auto_resize(true);
         Ok(Self::from_histogram(histogram))
     }
 
     pub fn with_high_sigvdig(highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {
-        Histogram::<u64>::with_high_sigvdig(highest_trackable_value, significant_value_digits).map(Self::from_histogram)
+        Histogram::with_high_sigvdig(highest_trackable_value, significant_value_digits).map(Self::from_histogram)
     }
 
     pub fn with_low_high_sigvdig(
@@ -427,11 +429,11 @@ impl SingleWriterRecorder {
         highest_trackable_value: u64,
         significant_value_digits: u8,
     ) -> Result<Self, CreationError> {
-        Histogram::<u64>::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
+        Histogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
             .map(Self::from_histogram)
     }
 
-    pub fn from_histogram(mut histogram: Histogram<u64>) -> Self {
+    pub fn from_histogram(mut histogram: Histogram) -> Self {
         let inactive_settings = histogram.settings().clone();
         let inactive_integer_to_double_value_conversion_ratio = histogram.integer_to_double_value_conversion_ratio();
         histogram.meta_data.set_start_now();
@@ -490,8 +492,8 @@ impl SingleWriterRecorder {
         SingleWriterLockingSample::new(self, sample, pfg)
     }
 
-    fn fresh_histogram_for_inactive(&self) -> Result<Histogram<u64>, CreationError> {
-        let mut fresh = Histogram::<u64>::with_low_high_sigvdig(
+    fn fresh_histogram_for_inactive(&self) -> Result<Histogram, CreationError> {
+        let mut fresh = Histogram::with_low_high_sigvdig(
             self.inactive_settings.lowest_discernible_value,
             self.inactive_settings.highest_trackable_value,
             self.inactive_settings.number_of_significant_value_digits as u8,
@@ -503,17 +505,13 @@ impl SingleWriterRecorder {
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
         &self,
-        inactive_histogram: *mut Histogram<u64>,
+        inactive_histogram: *mut Histogram,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut Histogram<u64> {
+    ) -> *mut Histogram {
         self.perform_interval_sample_locked(inactive_histogram, flip_guard)
     }
 
-    fn perform_interval_sample_locked<'a>(
-        &self,
-        inactive_histogram: *mut Histogram<u64>,
-        flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut Histogram<u64> {
+    fn perform_interval_sample_locked<'a>(&self, inactive_histogram: *mut Histogram, flip_guard: &PhaseFlipGuard<'a>) -> *mut Histogram {
         let _access = self.core.begin_sampling();
         let now = SystemTime::now();
         unsafe { (*inactive_histogram).meta_data.set_start_timestamp(now) };
@@ -527,7 +525,7 @@ impl SingleWriterRecorder {
 }
 
 impl<P: OverflowPolicy> DoubleRecorder<P> {
-    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramImpl<P>) -> Self {
+    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
         histogram.meta_data_mut().set_start_now();
         DoubleRecorder {
             instance_id: get_instance_id(),
@@ -580,7 +578,7 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
     pub fn locking_sample<'a>(&'a self) -> DoubleLockingSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let active = unsafe { &*self.core.active() };
-        let fresh_histogram = ConcurrentDoubleHistogramImpl::<P>::with_highest_to_lowest_value_ratio(
+        let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
             active.get_highest_to_lowest_value_ratio(),
             active.get_number_of_significant_value_digits(),
         )
@@ -592,9 +590,9 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
         &self,
-        inactive_histogram: *mut ConcurrentDoubleHistogramImpl<P>,
+        inactive_histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut ConcurrentDoubleHistogramImpl<P> {
+    ) -> *mut ConcurrentDoubleHistogramWithPolicy<P> {
         let now = SystemTime::now();
         unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
@@ -606,18 +604,21 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
 
 impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
     pub fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
-        DoubleHistogramImpl::<P>::new(number_of_significant_value_digits).map(Self::from_histogram)
+        DoubleHistogramWithPolicy::<P>::new(number_of_significant_value_digits).map(Self::from_histogram)
     }
 
     pub fn with_highest_to_lowest_value_ratio(
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {
-        DoubleHistogramImpl::<P>::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
-            .map(Self::from_histogram)
+        DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
+            highest_to_lowest_value_ratio,
+            number_of_significant_value_digits,
+        )
+        .map(Self::from_histogram)
     }
 
-    pub fn from_histogram(mut histogram: DoubleHistogramImpl<P>) -> Self {
+    pub fn from_histogram(mut histogram: DoubleHistogramWithPolicy<P>) -> Self {
         let inactive_highest_to_lowest_value_ratio = histogram.get_highest_to_lowest_value_ratio();
         let inactive_number_of_significant_value_digits = histogram.get_number_of_significant_value_digits();
         let inactive_auto_resize = histogram.is_auto_resize();
@@ -684,8 +685,8 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
         SingleWriterDoubleLockingSample::new(self, sample, pfg)
     }
 
-    fn fresh_histogram_for_inactive(&self) -> Result<DoubleHistogramImpl<P>, DoubleCreationError> {
-        let mut fresh = DoubleHistogramImpl::<P>::with_highest_to_lowest_value_ratio(
+    fn fresh_histogram_for_inactive(&self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {
+        let mut fresh = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
             self.inactive_highest_to_lowest_value_ratio,
             self.inactive_number_of_significant_value_digits,
         )?;
@@ -695,17 +696,17 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
         &self,
-        inactive_histogram: *mut DoubleHistogramImpl<P>,
+        inactive_histogram: *mut DoubleHistogramWithPolicy<P>,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut DoubleHistogramImpl<P> {
+    ) -> *mut DoubleHistogramWithPolicy<P> {
         self.perform_interval_sample_locked(inactive_histogram, flip_guard)
     }
 
     fn perform_interval_sample_locked<'a>(
         &self,
-        inactive_histogram: *mut DoubleHistogramImpl<P>,
+        inactive_histogram: *mut DoubleHistogramWithPolicy<P>,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut DoubleHistogramImpl<P> {
+    ) -> *mut DoubleHistogramWithPolicy<P> {
         let _access = self.core.begin_sampling();
         let now = SystemTime::now();
         unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };

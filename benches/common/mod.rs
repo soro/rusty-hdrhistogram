@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use hdrhistogram::st::{DoubleHistogram, Histogram};
+use hdrhistogram::st::{DoubleHistogram, Histogram, HistogramWithCounter};
 
 pub const HIGHEST_TRACKABLE_VALUE: u64 = 3_600 * 1_000 * 1_000;
 pub const SIGNIFICANT_VALUE_DIGITS: u8 = 3;
@@ -42,8 +42,8 @@ pub fn latency_series(series: LatencySeries) -> Vec<u64> {
     }
 }
 
-pub fn histogram_u64(series: LatencySeries, significant_value_digits: u8) -> Histogram<u64> {
-    let mut histogram = Histogram::<u64>::new(significant_value_digits).unwrap();
+pub fn histogram_u64(series: LatencySeries, significant_value_digits: u8) -> Histogram {
+    let mut histogram = Histogram::new(significant_value_digits).unwrap();
     histogram.set_auto_resize(true);
     for value in latency_series(series) {
         histogram.record_value(value).unwrap();
@@ -51,8 +51,8 @@ pub fn histogram_u64(series: LatencySeries, significant_value_digits: u8) -> His
     histogram
 }
 
-pub fn histogram_u32(series: LatencySeries, significant_value_digits: u8) -> Histogram<u32> {
-    let mut histogram = Histogram::<u32>::new(significant_value_digits).unwrap();
+pub fn histogram_u32(series: LatencySeries, significant_value_digits: u8) -> HistogramWithCounter<u32> {
+    let mut histogram = HistogramWithCounter::<u32>::new(significant_value_digits).unwrap();
     histogram.set_auto_resize(true);
     for value in latency_series(series) {
         histogram.record_value(value).unwrap();
@@ -120,7 +120,7 @@ pub fn histogram_log(intervals: usize, significant_value_digits: u8) -> String {
         writer.write_base_time(1_700_000_000.0).unwrap();
         writer.write_legend().unwrap();
         for interval in 0..intervals {
-            let mut histogram = Histogram::<u64>::new(significant_value_digits).unwrap();
+            let mut histogram = Histogram::new(significant_value_digits).unwrap();
             histogram.set_auto_resize(true);
             for value in latency_series(LatencySeries::Mixed) {
                 histogram.record_value(value + interval as u64).unwrap();

@@ -6,9 +6,12 @@ use crate::iteration::*;
 use crate::st::backing_array::BackingArray;
 use std;
 use std::borrow::Borrow;
+use std::marker::PhantomData;
+
+const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
 #[repr(C)]
-pub struct Histogram<T> {
+pub struct HistogramWithCounter<T> {
     pub meta_data: HistogramMetaData,
     layout: HistogramLayout,
     auto_resize: bool,
@@ -21,8 +24,70 @@ pub struct Histogram<T> {
     counts: BackingArray<T>,
 }
 
+/// The default integer histogram type, using `u64` counters.
+pub type Histogram = HistogramWithCounter<u64>;
+
+/// Builder for integer histograms.
+///
+/// Builders default to three decimal significant digits. Use
+/// [`significant_digits`](Self::significant_digits) to choose a different
+/// precision.
+pub struct HistogramBuilder<T = u64> {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+    auto_resize: bool,
+    _counter: PhantomData<T>,
+}
+
+impl<T: Counter> HistogramBuilder<T> {
+    pub fn new() -> Self {
+        HistogramBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+            _counter: PhantomData,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the histogram.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<HistogramWithCounter<T>, CreationError> {
+        let mut histogram = HistogramWithCounter::<T>::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(histogram)
+    }
+}
+
 // read methods
-impl<T: Counter> Histogram<T> {
+impl<T: Counter> HistogramWithCounter<T> {
     /// Return a snapshot of the settings that define this histogram's precision
     /// and current trackable range.
     pub fn settings(&self) -> HistogramSettings {
@@ -91,7 +156,7 @@ impl<T: Counter> Histogram<T> {
         h
     }
 
-    pub fn equals(&self, other: &Histogram<T>) -> bool {
+    pub fn equals(&self, other: &HistogramWithCounter<T>) -> bool {
         if std::ptr::eq(self, other) {
             return true;
         }
@@ -257,25 +322,29 @@ impl<T: Counter> Histogram<T> {
     }
 }
 
-// write methods
-impl<T: Counter> Histogram<T> {
-    pub fn new(significant_value_digits: u8) -> Result<Histogram<T>, CreationError> {
-        Histogram::<T>::with_sigvdig(significant_value_digits)
+impl<T: Counter> HistogramWithCounter<T> {
+    /// Create a builder for an integer histogram.
+    pub fn builder() -> HistogramBuilder<T> {
+        HistogramBuilder::new()
     }
-    pub fn with_sigvdig(significant_value_digits: u8) -> Result<Histogram<T>, CreationError> {
-        Histogram::<T>::with_high_sigvdig(2, significant_value_digits)
+
+    pub fn new(significant_value_digits: u8) -> Result<HistogramWithCounter<T>, CreationError> {
+        HistogramWithCounter::<T>::with_sigvdig(significant_value_digits)
     }
-    pub fn with_high_sigvdig(highest_trackable_value: u64, significant_value_digits: u8) -> Result<Histogram<T>, CreationError> {
-        Histogram::<T>::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
+    pub fn with_sigvdig(significant_value_digits: u8) -> Result<HistogramWithCounter<T>, CreationError> {
+        HistogramWithCounter::<T>::with_high_sigvdig(2, significant_value_digits)
+    }
+    pub fn with_high_sigvdig(highest_trackable_value: u64, significant_value_digits: u8) -> Result<HistogramWithCounter<T>, CreationError> {
+        HistogramWithCounter::<T>::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
     }
     pub fn with_low_high_sigvdig(
         lowest_discernible_value: u64,
         highest_trackable_value: u64,
         significant_value_digits: u8,
-    ) -> Result<Histogram<T>, CreationError> {
+    ) -> Result<HistogramWithCounter<T>, CreationError> {
         let layout = HistogramLayout::new(lowest_discernible_value, highest_trackable_value, significant_value_digits)?;
         let metadata = layout.initial_metadata_for_highest(highest_trackable_value)?;
-        Ok(Histogram {
+        Ok(HistogramWithCounter {
             meta_data: HistogramMetaData::new(),
             layout,
             auto_resize: false,
@@ -564,7 +633,7 @@ impl<T: Counter> Histogram<T> {
         self.record_value_with_count_and_expected_interval(value, T::one(), expected_interval_between_value_samples)
     }
 
-    pub fn add<B: Borrow<Histogram<T>>>(&mut self, other_histogram: B) -> Result<(), RecordError> {
+    pub fn add<B: Borrow<HistogramWithCounter<T>>>(&mut self, other_histogram: B) -> Result<(), RecordError> {
         let other_histogram = other_histogram.borrow();
 
         let highest_recordable_value = self.highest_equivalent_value(self.value_from_index(self.last_index()));
@@ -616,7 +685,7 @@ impl<T: Counter> Histogram<T> {
         Ok(())
     }
 
-    pub fn subtract<B: Borrow<Histogram<T>>>(&mut self, other_histogram: B) -> Result<(), SubtractionError> {
+    pub fn subtract<B: Borrow<HistogramWithCounter<T>>>(&mut self, other_histogram: B) -> Result<(), SubtractionError> {
         let other_histogram = other_histogram.borrow();
 
         // make sure we can take the values in source
@@ -725,17 +794,19 @@ impl<T: Counter> Histogram<T> {
     }
 }
 
-impl<T: Counter> ConstructableHistogram for Histogram<T> {
+impl<T: Counter> ConstructableHistogram for HistogramWithCounter<T> {
     fn new(lowest_discernible_value: u64, highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {
-        Histogram::<T>::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
+        HistogramWithCounter::<T>::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
     }
 
     fn establish_internal_tracking_values(&mut self) {
-        Histogram::<T>::establish_internal_tracking_values(self)
+        HistogramWithCounter::<T>::establish_internal_tracking_values(self)
     }
 }
 
-impl<T: Counter> ReadableHistogram for Histogram<T> {
+impl<T: Counter> crate::core::readable_histogram::sealed::Sealed for HistogramWithCounter<T> {}
+
+impl<T: Counter> ReadableHistogram for HistogramWithCounter<T> {
     fn settings(&self) -> HistogramSettings {
         self.settings()
     }
@@ -745,14 +816,14 @@ impl<T: Counter> ReadableHistogram for Histogram<T> {
     }
     #[inline(always)]
     fn get_total_count(&self) -> u64 {
-        Histogram::<T>::get_total_count(self)
+        HistogramWithCounter::<T>::get_total_count(self)
     }
     #[inline(always)]
     fn unsafe_get_count_at_index(&self, idx: u32) -> u64 {
-        Histogram::<T>::unsafe_get_count_at_index(self, idx).as_u64()
+        HistogramWithCounter::<T>::unsafe_get_count_at_index(self, idx).as_u64()
     }
     fn get_max_value(&self) -> u64 {
-        Histogram::<T>::get_max_value(self)
+        HistogramWithCounter::<T>::get_max_value(self)
     }
 
     fn meta_data(&self) -> &HistogramMetaData {
@@ -760,23 +831,23 @@ impl<T: Counter> ReadableHistogram for Histogram<T> {
     }
 
     fn integer_to_double_value_conversion_ratio(&self) -> f64 {
-        Histogram::<T>::integer_to_double_value_conversion_ratio(self)
+        HistogramWithCounter::<T>::integer_to_double_value_conversion_ratio(self)
     }
 
     fn normalizing_index_offset(&self) -> i32 {
-        Histogram::<T>::normalizing_index_offset(self)
+        HistogramWithCounter::<T>::normalizing_index_offset(self)
     }
 }
 
-impl<T: Counter> IterableHistogram for Histogram<T> {}
+impl<T: Counter> IterableHistogram for HistogramWithCounter<T> {}
 
-impl<T: Counter> EncodableHistogram for Histogram<T> {}
+impl<T: Counter> EncodableHistogram for HistogramWithCounter<T> {}
 
-impl<T: Counter> Histogram<T> {
+impl<T: Counter> HistogramWithCounter<T> {
     pub fn get_counts_slice(&self, length: u32) -> Option<&[T]> {
         self.counts.get_slice(length)
     }
-    pub fn get_counts_slice_mut(&mut self, length: u32) -> Option<&mut [T]> {
+    pub(crate) fn get_counts_slice_mut(&mut self, length: u32) -> Option<&mut [T]> {
         self.counts.get_slice_mut(length)
     }
     #[inline(always)]
@@ -796,7 +867,7 @@ impl<T: Counter> Histogram<T> {
     }
 }
 
-impl<T: Counter> PartialEq for Histogram<T> {
+impl<T: Counter> PartialEq for HistogramWithCounter<T> {
     fn eq(&self, other: &Self) -> bool {
         self.equals(other)
     }

@@ -1,7 +1,7 @@
 use crate::concurrent::concurrent_util;
 use crate::concurrent::inline_backing_array::InlineBackingArray;
 use crate::concurrent::recordable_histogram::RecordableHistogram;
-use crate::concurrent::snapshot::{Snapshot, StaticSnapshot};
+use crate::concurrent::snapshot::{FixedSnapshot, Snapshot};
 use crate::core::constants::*;
 use crate::core::*;
 use crate::iteration::RecordedValuesIterator;
@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 #[repr(C)]
-pub struct StaticHistogram {
+pub struct FixedConcurrentHistogram {
     meta_data: HistogramMetaData,
     layout: HistogramLayout,
     raw_max_value: AtomicU64,
@@ -19,7 +19,57 @@ pub struct StaticHistogram {
     pub(in crate::concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
-impl Drop for StaticHistogram {
+const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
+
+/// Builder for a fixed-range concurrent integer histogram.
+///
+/// Builders default to three decimal significant digits. Use
+/// [`significant_digits`](Self::significant_digits) to choose a different
+/// precision.
+pub struct FixedConcurrentHistogramBuilder {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+}
+
+impl FixedConcurrentHistogramBuilder {
+    pub fn new() -> Self {
+        FixedConcurrentHistogramBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the histogram.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn build(self) -> Result<FixedConcurrentHistogram, CreationError> {
+        FixedConcurrentHistogram::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )
+    }
+}
+
+impl Drop for FixedConcurrentHistogram {
     fn drop(&mut self) {
         let counts = *self.counts.get_mut();
         debug_assert!(!counts.is_null());
@@ -29,20 +79,24 @@ impl Drop for StaticHistogram {
     }
 }
 
-impl StaticHistogram {
-    pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<StaticHistogram, CreationError> {
+impl FixedConcurrentHistogram {
+    pub fn builder() -> FixedConcurrentHistogramBuilder {
+        FixedConcurrentHistogramBuilder::new()
+    }
+
+    pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<FixedConcurrentHistogram, CreationError> {
         Self::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
     }
     pub fn with_low_high_sigvdig(
         lowest_discernible_value: u64,
         highest_trackable_value: u64,
         significant_value_digits: u8,
-    ) -> Result<StaticHistogram, CreationError> {
+    ) -> Result<FixedConcurrentHistogram, CreationError> {
         let layout = HistogramLayout::new(lowest_discernible_value, highest_trackable_value, significant_value_digits)?;
         let metadata = layout.initial_metadata_for_highest(highest_trackable_value)?;
         unsafe {
             let array_ptr = InlineBackingArray::new(metadata);
-            Ok(StaticHistogram {
+            Ok(FixedConcurrentHistogram {
                 meta_data: HistogramMetaData::new(),
                 layout,
                 raw_max_value: AtomicU64::new(ORIGINAL_MAX),
@@ -339,14 +393,14 @@ impl StaticHistogram {
         Snapshot::new(self)
     }
 
-    pub fn as_snapshot(&mut self) -> StaticSnapshot<'_> {
-        StaticSnapshot::new(Snapshot::new(self))
+    pub fn as_snapshot(&mut self) -> FixedSnapshot<'_> {
+        FixedSnapshot::new(Snapshot::new(self))
     }
 }
 
-impl ConstructableHistogram for StaticHistogram {
+impl ConstructableHistogram for FixedConcurrentHistogram {
     fn new(lowest_discernible_value: u64, highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {
-        StaticHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
+        FixedConcurrentHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
     }
 
     fn establish_internal_tracking_values(&mut self) {
@@ -367,12 +421,12 @@ impl ConstructableHistogram for StaticHistogram {
     }
 }
 
-impl RecordableHistogram for StaticHistogram {
-    fn fresh(settings: &HistogramSettings) -> Result<StaticHistogram, CreationError> {
+impl RecordableHistogram for FixedConcurrentHistogram {
+    fn fresh(settings: &HistogramSettings) -> Result<FixedConcurrentHistogram, CreationError> {
         let lowest_discernable = settings.lowest_discernible_value;
         let highest_trackable = settings.highest_trackable_value;
         let sigvdig = settings.number_of_significant_value_digits as u8;
-        StaticHistogram::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
+        FixedConcurrentHistogram::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
     }
     #[inline(always)]
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData {
@@ -380,25 +434,27 @@ impl RecordableHistogram for StaticHistogram {
     }
     #[inline(always)]
     unsafe fn clear_counts(&self) {
-        StaticHistogram::clear_counts(self);
+        FixedConcurrentHistogram::clear_counts(self);
     }
     fn equals(&self, other: &Self) -> bool {
-        StaticHistogram::equals(self, other)
+        FixedConcurrentHistogram::equals(self, other)
     }
     fn get_min_non_zero_value(&self) -> u64 {
-        StaticHistogram::get_min_non_zero_value(self)
+        FixedConcurrentHistogram::get_min_non_zero_value(self)
     }
     #[inline(always)]
     fn record_value(&self, value: u64) -> Result<(), RecordError> {
-        StaticHistogram::record_value(self, value)
+        FixedConcurrentHistogram::record_value(self, value)
     }
     #[inline(always)]
     fn record_value_with_count(&self, value: u64, count: u64) -> Result<(), RecordError> {
-        StaticHistogram::record_value_with_count(self, value, count)
+        FixedConcurrentHistogram::record_value_with_count(self, value, count)
     }
 }
 
-impl ReadableHistogram for StaticHistogram {
+impl crate::core::readable_histogram::sealed::Sealed for FixedConcurrentHistogram {}
+
+impl ReadableHistogram for FixedConcurrentHistogram {
     #[inline(always)]
     fn settings(&self) -> HistogramSettings {
         self.settings()
@@ -413,16 +469,16 @@ impl ReadableHistogram for StaticHistogram {
         self.unsafe_get_count_at_index(idx)
     }
     fn get_max_value(&self) -> u64 {
-        StaticHistogram::get_max_value(self)
+        FixedConcurrentHistogram::get_max_value(self)
     }
     fn meta_data(&self) -> &HistogramMetaData {
         &self.meta_data
     }
     fn integer_to_double_value_conversion_ratio(&self) -> f64 {
-        StaticHistogram::integer_to_double_value_conversion_ratio(self)
+        FixedConcurrentHistogram::integer_to_double_value_conversion_ratio(self)
     }
 
     fn normalizing_index_offset(&self) -> i32 {
-        StaticHistogram::normalizing_index_offset(self)
+        FixedConcurrentHistogram::normalizing_index_offset(self)
     }
 }

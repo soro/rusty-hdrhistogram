@@ -6,6 +6,26 @@ const TRACKABLE_VALUE_RANGE_SIZE: u64 = 3600 * 1000 * 1000;
 const NUMBER_OF_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 const TEST_VALUE_LEVEL: f64 = 4.0;
 
+#[test]
+fn double_histogram_builders_construct_expected_variants() {
+    let mut histogram = DoubleHistogram::builder()
+        .significant_digits(3)
+        .highest_to_lowest_value_ratio(1_024)
+        .auto_resize(true)
+        .build()
+        .unwrap();
+    succ!(histogram.record_value(42.0));
+    assert_eq!(1, histogram.get_total_count());
+
+    let concurrent = ConcurrentDoubleHistogram::builder()
+        .significant_digits(3)
+        .highest_to_lowest_value_ratio(1_024)
+        .build()
+        .unwrap();
+    succ!(concurrent.record_value(42.0));
+    assert_eq!(1, concurrent.get_total_count());
+}
+
 trait TestDoubleHistogram: Sized {
     fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError>;
     fn with_highest_to_lowest_value_ratio(

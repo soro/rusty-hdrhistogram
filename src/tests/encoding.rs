@@ -22,7 +22,7 @@ fn histogram_settings_estimate_v2_encoding_capacity() {
 
 #[test]
 fn histogram_v2_roundtrip_preserves_counts() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(3_600_000_000, 3).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(3_600_000_000, 3).unwrap();
     histogram.record_value_with_count(0, 3).unwrap();
     histogram.record_value(1).unwrap();
     histogram.record_value_with_count(10_000, 2).unwrap();
@@ -42,7 +42,7 @@ fn histogram_v2_roundtrip_preserves_counts() {
 
 #[test]
 fn histogram_v2_decode_canonicalizes_normalizing_index_offset() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(1_024, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let mut encoded = encode_histogram_v2(&histogram).unwrap();
@@ -55,7 +55,7 @@ fn histogram_v2_decode_canonicalizes_normalizing_index_offset() {
 
 #[test]
 fn generic_decode_detects_integer_histogram() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(2_000, 7).unwrap();
 
     let encoded = encode_histogram_v2(&histogram).unwrap();
@@ -123,7 +123,7 @@ fn decode_rejects_invalid_cookie() {
 #[cfg(feature = "encoding-compression")]
 #[test]
 fn compressed_histogram_roundtrip_preserves_counts() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(1_000_000, 3).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(1_000_000, 3).unwrap();
     histogram.record_value_with_count(42, 5).unwrap();
     histogram.record_value_with_count(999_999, 2).unwrap();
 
@@ -153,7 +153,7 @@ fn compressed_double_histogram_roundtrip_preserves_counts() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn base64_histogram_roundtrip_preserves_counts() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(1_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
     histogram.record_value_with_count(100, 9).unwrap();
 
     let encoded = encode_histogram_base64(&histogram).unwrap();
@@ -164,7 +164,7 @@ fn base64_histogram_roundtrip_preserves_counts() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_line_roundtrip_preserves_metadata_and_counts() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(1_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
     histogram.record_value_with_count(250, 6).unwrap();
     histogram.meta_data.set_tag_string("phase-a".to_string());
 
@@ -247,11 +247,11 @@ fn histogram_log_scanner_reports_java_timing_semantics_without_decoding() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_generates_interval_and_percentile_outputs() {
-    let mut first = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut first = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     first.record_value_with_count(100, 3).unwrap();
     first.record_value(500).unwrap();
 
-    let mut second = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut second = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     second.record_value_with_count(1_000, 2).unwrap();
 
     let log = format!(
@@ -305,10 +305,10 @@ fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_filters_by_tag() {
-    let mut untagged = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut untagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     untagged.record_value(100).unwrap();
 
-    let mut tagged = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut tagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     tagged.record_value_with_count(1_000, 7).unwrap();
     tagged.meta_data.set_tag_string("phase-a".to_string());
 
@@ -334,10 +334,10 @@ fn histogram_log_report_filters_by_tag() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_can_emit_moving_window_output() {
-    let mut first = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut first = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     first.record_value_with_count(100, 3).unwrap();
 
-    let mut second = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut second = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     second.record_value_with_count(1_000, 2).unwrap();
 
     let log = format!(
@@ -366,7 +366,7 @@ fn histogram_log_report_can_emit_moving_window_output() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_reader_writer_preserve_base_time_semantics() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let mut output = Vec::new();
@@ -396,7 +396,7 @@ fn histogram_log_reader_writer_preserve_base_time_semantics() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_can_stream_input_and_outputs() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let log = format!(
@@ -437,9 +437,9 @@ fn histogram_log_report_can_stream_input_and_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_applies_range_boundaries_to_interval_start() {
-    let mut first = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut first = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     first.record_value(100).unwrap();
-    let mut second = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut second = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     second.record_value_with_count(200, 2).unwrap();
 
     let log = format!(
@@ -555,7 +555,7 @@ fn histogram_log_writer_accepts_concurrent_double_snapshot() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_rejects_mixed_integer_and_double_logs() {
-    let mut integer_histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut integer_histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     integer_histogram.record_value(100).unwrap();
     let mut double_histogram = DoubleHistogram::new(2).unwrap();
     double_histogram.record_value(1.5).unwrap();
@@ -581,7 +581,7 @@ fn histogram_log_report_rejects_mixed_integer_and_double_logs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_can_correct_for_coordinated_omission() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value(100).unwrap();
 
     let log = format!(
@@ -603,7 +603,7 @@ fn histogram_log_report_can_correct_for_coordinated_omission() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_report_can_emit_text_output() {
-    let mut histogram = Histogram::<u64>::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let log = format!(

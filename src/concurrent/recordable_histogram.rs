@@ -5,7 +5,7 @@ mod sealed {
 }
 
 impl sealed::Sealed for super::ResizableConcurrentHistogram {}
-impl sealed::Sealed for super::StaticHistogram {}
+impl sealed::Sealed for super::FixedConcurrentHistogram {}
 
 pub(crate) trait RecordableHistogram: sealed::Sealed + ReadableHistogram + Sized {
     fn fresh(settings: &HistogramSettings) -> Result<Self, CreationError>;

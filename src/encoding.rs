@@ -6,7 +6,7 @@
 
 use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, EncodableHistogram, OverflowPolicy, ReadableHistogram};
-use crate::st::{DoubleHistogram, DoubleHistogramImpl, Histogram};
+use crate::st::{DoubleHistogram, DoubleHistogramWithPolicy, Histogram};
 
 #[cfg(feature = "encoding-base64")]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -138,7 +138,7 @@ impl std::error::Error for DecodeError {
 }
 
 pub enum DecodedHistogram {
-    Integer(Histogram<u64>),
+    Integer(Histogram),
     Double(DoubleHistogram),
 }
 
@@ -672,7 +672,7 @@ impl<W: Write> HistogramLogWriter<W> {
 
     pub fn write_double_interval<P: OverflowPolicy>(
         &mut self,
-        histogram: &DoubleHistogramImpl<P>,
+        histogram: &DoubleHistogramWithPolicy<P>,
         start_timestamp_sec: f64,
         end_timestamp_sec: f64,
     ) -> Result<(), EncodeError> {
@@ -790,11 +790,11 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedHistogram, DecodeError> {
     Err(DecodeError::InvalidCookie(cookie))
 }
 
-pub fn decode_histogram(bytes: &[u8]) -> Result<Histogram<u64>, DecodeError> {
+pub fn decode_histogram(bytes: &[u8]) -> Result<Histogram, DecodeError> {
     decode_histogram_with_min_highest_trackable_value(bytes, 0)
 }
 
-pub fn decode_histogram_v2(bytes: &[u8]) -> Result<Histogram<u64>, DecodeError> {
+pub fn decode_histogram_v2(bytes: &[u8]) -> Result<Histogram, DecodeError> {
     let cookie = peek_cookie(bytes)?;
     if cookie_base(cookie) != V2_ENCODING_COOKIE_BASE {
         return Err(DecodeError::InvalidCookie(cookie));
@@ -802,10 +802,7 @@ pub fn decode_histogram_v2(bytes: &[u8]) -> Result<Histogram<u64>, DecodeError> 
     decode_histogram(bytes)
 }
 
-pub fn decode_histogram_with_min_highest_trackable_value(
-    bytes: &[u8],
-    min_highest_trackable_value: u64,
-) -> Result<Histogram<u64>, DecodeError> {
+pub fn decode_histogram_with_min_highest_trackable_value(bytes: &[u8], min_highest_trackable_value: u64) -> Result<Histogram, DecodeError> {
     let mut reader = Reader::new(bytes);
     let cookie = reader.read_u32()?;
     let base = cookie_base(cookie);
@@ -882,7 +879,7 @@ pub fn decode_histogram_with_min_highest_trackable_value(
     }
 
     let highest_trackable_value = highest_trackable_value.max(min_highest_trackable_value);
-    let mut histogram = Histogram::<u64>::with_low_high_sigvdig(
+    let mut histogram = Histogram::with_low_high_sigvdig(
         lowest_discernible_value,
         highest_trackable_value,
         number_of_significant_value_digits as u8,
@@ -911,7 +908,7 @@ fn encode_double_histogram_v2_from_integer<H: EncodableHistogram>(
     Ok(encoded)
 }
 
-pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_v2_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -973,7 +970,7 @@ pub fn encode_histogram_compressed_with_level<H: EncodableHistogram>(
 }
 
 #[cfg(feature = "encoding-compression")]
-pub fn decode_histogram_compressed(bytes: &[u8]) -> Result<Histogram<u64>, DecodeError> {
+pub fn decode_histogram_compressed(bytes: &[u8]) -> Result<Histogram, DecodeError> {
     decode_histogram_compressed_with_min_highest_trackable_value(bytes, 0)
 }
 
@@ -981,7 +978,7 @@ pub fn decode_histogram_compressed(bytes: &[u8]) -> Result<Histogram<u64>, Decod
 pub fn decode_histogram_compressed_with_min_highest_trackable_value(
     bytes: &[u8],
     min_highest_trackable_value: u64,
-) -> Result<Histogram<u64>, DecodeError> {
+) -> Result<Histogram, DecodeError> {
     let mut reader = Reader::new(bytes);
     let cookie = reader.read_u32()?;
     if !is_histogram_compressed_encoding_cookie(cookie) {
@@ -1012,7 +1009,7 @@ fn encode_double_histogram_compressed_from_integer<H: EncodableHistogram>(
 }
 
 #[cfg(feature = "encoding-compression")]
-pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -1058,7 +1055,7 @@ fn encode_double_histogram_compressed_with_level_from_integer<H: EncodableHistog
 
 #[cfg(feature = "encoding-compression")]
 pub fn encode_double_histogram_compressed_with_level<P: OverflowPolicy>(
-    histogram: &DoubleHistogramImpl<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     compression_level: u32,
 ) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_with_level_from_integer(
@@ -1118,7 +1115,7 @@ pub fn encode_histogram_base64<H: EncodableHistogram>(histogram: &H) -> Result<S
 }
 
 #[cfg(feature = "encoding-base64")]
-pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram<u64>, DecodeError> {
+pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram, DecodeError> {
     let compressed = BASE64_STANDARD
         .decode(encoded)
         .map_err(|err| DecodeError::Base64(err.to_string()))?;
@@ -1126,7 +1123,7 @@ pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram<u64>, DecodeEr
 }
 
 #[cfg(feature = "encoding-base64")]
-pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<String, EncodeError> {
+pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<String, EncodeError> {
     Ok(BASE64_STANDARD.encode(encode_double_histogram_compressed(histogram)?))
 }
 
@@ -1203,7 +1200,7 @@ pub fn encode_histogram_log_line_with_max_value_unit_ratio<H: EncodableHistogram
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
-    histogram: &DoubleHistogramImpl<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
 ) -> Result<String, EncodeError> {
@@ -1217,7 +1214,7 @@ pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line_with_max_value_unit_ratio<P: OverflowPolicy>(
-    histogram: &DoubleHistogramImpl<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
     max_value_unit_ratio: f64,
@@ -1889,8 +1886,8 @@ fn java_date_string(start_time_sec: f64) -> String {
 }
 
 #[cfg(feature = "encoding-base64")]
-fn empty_integer_accumulator_like(histogram: &Histogram<u64>) -> Result<Histogram<u64>, DecodeError> {
-    let mut target = Histogram::<u64>::with_low_high_sigvdig(
+fn empty_integer_accumulator_like(histogram: &Histogram) -> Result<Histogram, DecodeError> {
+    let mut target = Histogram::with_low_high_sigvdig(
         histogram.get_lowest_discernible_value(),
         histogram.get_highest_trackable_value(),
         histogram.get_number_of_significant_value_digits() as u8,
@@ -2168,7 +2165,7 @@ fn report_record_error(context: &str, err: impl std::fmt::Debug) -> DecodeError 
     DecodeError::InvalidLogLine(format!("{}: {:?}", context, err))
 }
 
-fn decode_counts_payload(payload: &[u8], word_size: u8, histogram: &mut Histogram<u64>) -> Result<(), DecodeError> {
+fn decode_counts_payload(payload: &[u8], word_size: u8, histogram: &mut Histogram) -> Result<(), DecodeError> {
     let mut reader = Reader::new(payload);
     let mut dst_index = 0_u32;
     let counts_array_length = histogram.counts_array_length();

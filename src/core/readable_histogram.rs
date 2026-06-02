@@ -1,6 +1,13 @@
 use crate::core::{HistogramMetaData, HistogramSettings};
 
-pub(crate) trait ReadableHistogram {
+pub(crate) mod sealed {
+    pub trait Sealed {}
+
+    impl<T: super::ReadableHistogram + ?Sized> Sealed for &T {}
+}
+
+#[doc(hidden)]
+pub trait ReadableHistogram: sealed::Sealed {
     // required for iteration
     fn settings(&self) -> HistogramSettings;
     fn array_length(&self) -> u32;

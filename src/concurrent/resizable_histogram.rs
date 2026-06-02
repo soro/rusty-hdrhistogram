@@ -25,6 +25,65 @@ pub struct ResizableConcurrentHistogram {
     inactive_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
+const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
+
+/// Builder for a resizable concurrent integer histogram.
+///
+/// Builders default to three decimal significant digits. Use
+/// [`significant_digits`](Self::significant_digits) to choose a different
+/// precision.
+pub struct ResizableConcurrentHistogramBuilder {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+    auto_resize: bool,
+}
+
+impl ResizableConcurrentHistogramBuilder {
+    pub fn new() -> Self {
+        ResizableConcurrentHistogramBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the histogram.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<ResizableConcurrentHistogram, CreationError> {
+        let histogram = ResizableConcurrentHistogram::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(histogram)
+    }
+}
+
 /// A structurally stable view of a [`ResizableConcurrentHistogram`].
 ///
 /// The view captures the active/inactive backing arrays, storage metadata, and
@@ -72,6 +131,10 @@ unsafe impl Send for ResizableConcurrentHistogram {}
 unsafe impl Sync for ResizableConcurrentHistogram {}
 
 impl ResizableConcurrentHistogram {
+    pub fn builder() -> ResizableConcurrentHistogramBuilder {
+        ResizableConcurrentHistogramBuilder::new()
+    }
+
     pub fn new(significant_value_digits: u8) -> Result<ResizableConcurrentHistogram, CreationError> {
         ResizableConcurrentHistogram::with_sigvdig(significant_value_digits)
     }
@@ -1105,6 +1168,8 @@ impl ResizableConcurrentReadView<'_> {
     }
 }
 
+impl crate::core::readable_histogram::sealed::Sealed for ResizableConcurrentReadView<'_> {}
+
 impl ReadableHistogram for ResizableConcurrentReadView<'_> {
     fn settings(&self) -> HistogramSettings {
         self.settings.clone()
@@ -1206,6 +1271,8 @@ impl RecordableHistogram for ResizableConcurrentHistogram {
         ResizableConcurrentHistogram::record_value_with_count(self, value, count)
     }
 }
+
+impl crate::core::readable_histogram::sealed::Sealed for ResizableConcurrentHistogram {}
 
 impl ReadableHistogram for ResizableConcurrentHistogram {
     #[inline(always)]

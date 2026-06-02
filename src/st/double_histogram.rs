@@ -68,8 +68,10 @@ fn derive_integer_value_range(external_ratio: u64, significant_value_digits: u8)
     lowest_tracking_integer_value.checked_mul(internal_ratio)
 }
 
-pub struct DoubleHistogramImpl<P: OverflowPolicy> {
-    integer_histogram: Histogram<u64>,
+const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
+
+pub struct DoubleHistogramWithPolicy<P: OverflowPolicy> {
+    integer_histogram: Histogram,
     configured_highest_to_lowest_value_ratio: u64,
     current_lowest_value_in_auto_range: f64,
     current_highest_value_limit_in_auto_range: f64,
@@ -77,10 +79,65 @@ pub struct DoubleHistogramImpl<P: OverflowPolicy> {
     _policy: PhantomData<P>,
 }
 
-pub type DoubleHistogram = DoubleHistogramImpl<ThrowOnOverflow>;
-pub type SaturatingDoubleHistogram = DoubleHistogramImpl<SaturateOnOverflow>;
+/// Builder for floating-point histograms.
+///
+/// Builders default to three decimal significant digits. Use
+/// [`significant_digits`](Self::significant_digits) to choose a different
+/// precision.
+pub struct DoubleHistogramBuilder<P: OverflowPolicy> {
+    highest_to_lowest_value_ratio: u64,
+    number_of_significant_value_digits: u8,
+    auto_resize: bool,
+    _policy: PhantomData<P>,
+}
 
-impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
+impl<P: OverflowPolicy> DoubleHistogramBuilder<P> {
+    pub fn new() -> Self {
+        DoubleHistogramBuilder {
+            highest_to_lowest_value_ratio: 2,
+            number_of_significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+            _policy: PhantomData,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the histogram.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, number_of_significant_value_digits: u8) -> Self {
+        self.number_of_significant_value_digits = number_of_significant_value_digits;
+        self
+    }
+
+    pub fn highest_to_lowest_value_ratio(mut self, highest_to_lowest_value_ratio: u64) -> Self {
+        self.highest_to_lowest_value_ratio = highest_to_lowest_value_ratio;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {
+        let mut histogram = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
+            self.highest_to_lowest_value_ratio,
+            self.number_of_significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(histogram)
+    }
+}
+
+pub type DoubleHistogram = DoubleHistogramWithPolicy<ThrowOnOverflow>;
+pub type SaturatingDoubleHistogram = DoubleHistogramWithPolicy<SaturateOnOverflow>;
+
+impl<P: OverflowPolicy> DoubleHistogramWithPolicy<P> {
+    pub fn builder() -> DoubleHistogramBuilder<P> {
+        DoubleHistogramBuilder::new()
+    }
+
     pub fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
         let mut histogram = Self::with_highest_to_lowest_value_ratio(2, number_of_significant_value_digits)?;
         histogram.set_auto_resize(true);
@@ -106,9 +163,9 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         let integer_value_range = derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
             .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
         let highest_trackable_value = integer_value_range - 1;
-        let integer_histogram = Histogram::<u64>::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
+        let integer_histogram = Histogram::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
             .map_err(DoubleCreationError::Internal)?;
-        let mut histogram = DoubleHistogramImpl {
+        let mut histogram = DoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
             current_lowest_value_in_auto_range: 0.0,
@@ -124,7 +181,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     pub(crate) fn from_integer_histogram(
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
-        integer_histogram: Histogram<u64>,
+        integer_histogram: Histogram,
     ) -> Result<Self, DoubleCreationError> {
         if highest_to_lowest_value_ratio < 2 {
             return Err(DoubleCreationError::HighestToLowestValueRatioTooSmall);
@@ -154,7 +211,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         let current_lowest_value_in_auto_range = integer_to_double_ratio * integer_histogram.lowest_tracking_integer_value() as f64;
         let internal_ratio = derive_internal_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio);
 
-        Ok(DoubleHistogramImpl {
+        Ok(DoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
             current_lowest_value_in_auto_range,
@@ -261,7 +318,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         self.integer_histogram.get_number_of_significant_value_digits() as u8
     }
 
-    pub(crate) fn integer_histogram(&self) -> &Histogram<u64> {
+    pub(crate) fn integer_histogram(&self) -> &Histogram {
         &self.integer_histogram
     }
 
@@ -302,7 +359,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     }
 
     pub fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError> {
-        let mut target = DoubleHistogramImpl::with_highest_to_lowest_value_ratio(
+        let mut target = Self::with_highest_to_lowest_value_ratio(
             self.configured_highest_to_lowest_value_ratio,
             self.get_number_of_significant_value_digits(),
         )?;
@@ -314,27 +371,23 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         Ok(target)
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Histogram<u64>> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Histogram> {
         DoublePercentileIterator::new(&self.integer_histogram, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Histogram<u64>> {
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Histogram> {
         DoubleLinearIterator::new(&self.integer_histogram, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(
-        &self,
-        value_units_in_first_bucket: f64,
-        log_base: f64,
-    ) -> DoubleLogarithmicIterator<&'_ Histogram<u64>> {
+    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: f64, log_base: f64) -> DoubleLogarithmicIterator<&'_ Histogram> {
         DoubleLogarithmicIterator::new(&self.integer_histogram, value_units_in_first_bucket, log_base)
     }
 
-    pub fn all_values(&self) -> DoubleAllValuesIterator<&'_ Histogram<u64>> {
+    pub fn all_values(&self) -> DoubleAllValuesIterator<&'_ Histogram> {
         DoubleAllValuesIterator::new(&self.integer_histogram)
     }
 
-    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<&'_ Histogram<u64>> {
+    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<&'_ Histogram> {
         DoubleRecordedValuesIterator::new(&self.integer_histogram)
     }
 
