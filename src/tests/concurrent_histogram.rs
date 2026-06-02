@@ -1,5 +1,6 @@
 use crate::concurrent::{ConcurrentDoubleHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram, StaticHistogram};
 use crate::core::RecordError;
+use crate::iteration::IterationError;
 use parking_lot::RwLock;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -141,6 +142,41 @@ fn concurrent_double_range_shift_publication_under_writers() {
     assert!(histogram.get_count_at_value(1.0 / 1024.0) > 0);
     assert!(histogram.get_count_at_value(1.0) > 0);
     assert!(histogram.get_count_at_value(1_000_000.0) > 0);
+}
+
+#[test]
+fn resizable_read_view_iteration_reports_concurrent_modification() {
+    let histogram = ResizableConcurrentHistogram::new(2).unwrap();
+    succ!(histogram.record_value(1));
+
+    let view = histogram.read_view();
+    let mut iterator = view.recorded_values();
+    succ!(histogram.record_value(1));
+
+    assert_eq!(Err(IterationError::ConcurrentModification), iterator.try_next());
+}
+
+#[test]
+fn concurrent_double_read_view_iteration_reports_concurrent_modification() {
+    let histogram = ConcurrentDoubleHistogram::new(2).unwrap();
+    succ!(histogram.record_value(1.0));
+
+    let view = histogram.read_view();
+    let mut iterator = view.recorded_values();
+    succ!(histogram.record_value(1.0));
+
+    assert_eq!(Err(IterationError::ConcurrentModification), iterator.try_next());
+}
+
+#[test]
+fn concurrent_double_try_get_mean_reports_concurrent_modification() {
+    let histogram = ConcurrentDoubleHistogram::new(2).unwrap();
+    succ!(histogram.record_value(1.0));
+
+    let view = histogram.read_view();
+    succ!(histogram.record_value(1.0));
+
+    assert_eq!(Err(IterationError::ConcurrentModification), view.try_get_mean());
 }
 
 #[test]

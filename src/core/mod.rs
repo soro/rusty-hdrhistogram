@@ -17,4 +17,5 @@ pub use self::errors::*;
 pub use self::histogram_settings::HistogramSettings;
 pub(crate) use self::histogram_settings::{HistogramLayout, HistogramStorageMetadata};
 pub use self::meta_data::HistogramMetaData;
-pub use self::readable_histogram::{EncodableHistogram, IterableHistogram, ReadableHistogram};
+pub(crate) use self::readable_histogram::ReadableHistogram;
+pub use self::readable_histogram::{EncodableHistogram, IterableHistogram};

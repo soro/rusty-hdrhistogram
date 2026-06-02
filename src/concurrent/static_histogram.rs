@@ -19,6 +19,16 @@ pub struct StaticHistogram {
     pub(in crate::concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
 }
 
+impl Drop for StaticHistogram {
+    fn drop(&mut self) {
+        let counts = *self.counts.get_mut();
+        debug_assert!(!counts.is_null());
+        if !counts.is_null() {
+            unsafe { (*counts).dealloc() };
+        }
+    }
+}
+
 impl StaticHistogram {
     pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<StaticHistogram, CreationError> {
         Self::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
@@ -305,7 +315,14 @@ impl StaticHistogram {
             }
         } else {
             let other_last = other_len - 1;
-            for value in RecordedValuesIterator::from_readable(self) {
+            let mut iterator = RecordedValuesIterator::from_readable(self);
+            loop {
+                let Some(value) = (match iterator.try_next() {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                }) else {
+                    break;
+                };
                 let mut other_index = other.layout.counts_array_index(value.value_iterated_to);
                 if other_index > other_last {
                     other_index = other_last;

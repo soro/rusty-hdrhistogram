@@ -1,4 +1,4 @@
-use crate::core::{DoubleCreationError, OverflowPolicy, RecordError, SaturateOnOverflow, ThrowOnOverflow};
+use crate::core::{DoubleCreationError, HistogramMetaData, OverflowPolicy, RecordError, SaturateOnOverflow, ThrowOnOverflow};
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
     RecordedValuesIterator,
@@ -263,6 +263,10 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
 
     pub(crate) fn integer_histogram(&self) -> &Histogram<u64> {
         &self.integer_histogram
+    }
+
+    pub(crate) fn meta_data_mut(&mut self) -> &mut HistogramMetaData {
+        &mut self.integer_histogram.meta_data
     }
 
     pub(crate) fn bucket_count(&self) -> u32 {

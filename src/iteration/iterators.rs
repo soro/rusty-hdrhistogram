@@ -1,5 +1,6 @@
 use crate::core::{IterableHistogram, ReadableHistogram};
 use crate::iteration::histogram_iterator::HistogramIterator;
+use crate::iteration::iteration_error::IterationError;
 use crate::iteration::iteration_state::IterationState;
 use crate::iteration::iteration_strategy::*;
 use crate::iteration::{DoubleIterationValue, IterationValue};
@@ -34,10 +35,14 @@ impl<H: ReadableHistogram> AllValuesIterator<H> {
         self.0.state.reset(&self.0.histogram);
         self.0.strategy.visited_index = -1;
     }
+
+    pub fn try_next(&mut self) -> Result<Option<IterationValue>, IterationError> {
+        self.0.try_next_value()
+    }
 }
 
 // really need to make a derive macro for this
-impl<H: ReadableHistogram> Iterator for AllValuesIterator<H> {
+impl<H: IterableHistogram> Iterator for AllValuesIterator<H> {
     type Item = IterationValue;
     fn next(&mut self) -> Option<IterationValue> {
         self.0.next_value()
@@ -68,23 +73,60 @@ impl<H: ReadableHistogram> RecordedValuesIterator<H> {
         self.0.strategy.visited_index = -1;
     }
 
+    pub fn try_next(&mut self) -> Result<Option<IterationValue>, IterationError> {
+        self.0.try_next_value()
+    }
+
+    pub fn try_get_mean(iterator: &mut Self) -> Result<f64, IterationError> {
+        iterator.reset();
+        RecordedValuesIterator::try_get_mean_without_reset(iterator)
+    }
+
+    pub fn try_get_mean_without_reset(iterator: &mut Self) -> Result<f64, IterationError> {
+        iterator.0.check_not_concurrently_modified()?;
+        let total_count = iterator.0.histogram.get_total_count();
+        if total_count == 0 {
+            return Ok(0.0);
+        }
+        let settings = iterator.0.histogram.settings();
+        let mut total_value = 0;
+        while let Some(value) = iterator.try_next()? {
+            total_value += settings.median_equivalent_value(value.value_iterated_to) * value.count_at_value_iterated_to;
+        }
+        Ok(total_value as f64 / total_count as f64)
+    }
+
+    pub fn try_get_std_deviation(iterator: &mut Self) -> Result<f64, IterationError> {
+        iterator.reset();
+        RecordedValuesIterator::try_get_std_deviation_without_reset(iterator)
+    }
+
+    pub fn try_get_std_deviation_without_reset(iterator: &mut Self) -> Result<f64, IterationError> {
+        iterator.0.check_not_concurrently_modified()?;
+        let total_count = iterator.0.histogram.get_total_count();
+        if total_count == 0 {
+            return Ok(0.0);
+        }
+        let mean = RecordedValuesIterator::try_get_mean_without_reset(iterator)?;
+        iterator.reset();
+        let settings = iterator.0.histogram.settings();
+        let mut geometric_deviation_total = 0.0;
+        while let Some(value) = iterator.try_next()? {
+            let deviation = settings.median_equivalent_value(value.value_iterated_to) as f64 - mean;
+            geometric_deviation_total += (deviation * deviation) * value.count_added_in_this_iteration_step as f64;
+        }
+        Ok((geometric_deviation_total / total_count as f64).sqrt())
+    }
+}
+
+impl<H: IterableHistogram> RecordedValuesIterator<H> {
     pub fn get_mean(iterator: &mut Self) -> f64 {
         iterator.reset();
         RecordedValuesIterator::get_mean_without_reset(iterator)
     }
 
     pub fn get_mean_without_reset(iterator: &mut Self) -> f64 {
-        let total_count = iterator.0.histogram.get_total_count();
-        if total_count == 0 {
-            return 0.0;
-        }
-        let settings = iterator.0.histogram.settings();
-        let mut total_value = 0;
-        // TODO: switch to zero allocation version once implemented
-        for value in iterator {
-            total_value += settings.median_equivalent_value(value.value_iterated_to) * value.count_at_value_iterated_to;
-        }
-        total_value as f64 / total_count as f64
+        RecordedValuesIterator::try_get_mean_without_reset(iterator).expect("IterableHistogram sources must not be concurrently modified")
     }
 
     pub fn get_std_deviation(iterator: &mut Self) -> f64 {
@@ -93,24 +135,12 @@ impl<H: ReadableHistogram> RecordedValuesIterator<H> {
     }
 
     pub fn get_std_deviation_without_reset(iterator: &mut Self) -> f64 {
-        let total_count = iterator.0.histogram.get_total_count();
-        if total_count == 0 {
-            return 0.0;
-        }
-        let mean = RecordedValuesIterator::get_mean_without_reset(iterator);
-        iterator.reset();
-        let settings = iterator.0.histogram.settings();
-        let mut geometric_deviation_total = 0.0;
-        // TODO: switch to 0 alloc
-        for value in iterator {
-            let deviation = settings.median_equivalent_value(value.value_iterated_to) as f64 - mean;
-            geometric_deviation_total += (deviation * deviation) * value.count_added_in_this_iteration_step as f64;
-        }
-        (geometric_deviation_total / total_count as f64).sqrt()
+        RecordedValuesIterator::try_get_std_deviation_without_reset(iterator)
+            .expect("IterableHistogram sources must not be concurrently modified")
     }
 }
 
-impl<H: ReadableHistogram> Iterator for RecordedValuesIterator<H> {
+impl<H: IterableHistogram> Iterator for RecordedValuesIterator<H> {
     type Item = IterationValue;
     fn next(&mut self) -> Option<IterationValue> {
         self.0.next_value()
@@ -155,9 +185,13 @@ impl<H: ReadableHistogram> LinearIterator<H> {
     fn histogram(&self) -> &H {
         &self.0.histogram
     }
+
+    pub fn try_next(&mut self) -> Result<Option<IterationValue>, IterationError> {
+        self.0.try_next_value()
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for LinearIterator<H> {
+impl<H: IterableHistogram> Iterator for LinearIterator<H> {
     type Item = IterationValue;
     fn next(&mut self) -> Option<IterationValue> {
         self.0.next_value()
@@ -206,9 +240,13 @@ impl<H: ReadableHistogram> LogarithmicIterator<H> {
     fn histogram(&self) -> &H {
         &self.0.histogram
     }
+
+    pub fn try_next(&mut self) -> Result<Option<IterationValue>, IterationError> {
+        self.0.try_next_value()
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for LogarithmicIterator<H> {
+impl<H: IterableHistogram> Iterator for LogarithmicIterator<H> {
     type Item = IterationValue;
     fn next(&mut self) -> Option<IterationValue> {
         self.0.next_value()
@@ -249,9 +287,13 @@ impl<H: ReadableHistogram> PercentileIterator<H> {
         strategy.percentile_level_to_iterate_from = 0.0;
         strategy.reached_last_recorded_value = false;
     }
+
+    pub fn try_next(&mut self) -> Result<Option<IterationValue>, IterationError> {
+        self.0.try_next_value()
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for PercentileIterator<H> {
+impl<H: IterableHistogram> Iterator for PercentileIterator<H> {
     type Item = IterationValue;
     fn next(&mut self) -> Option<IterationValue> {
         self.0.next_value()
@@ -274,9 +316,13 @@ impl<H: ReadableHistogram> DoubleAllValuesIterator<H> {
     pub fn reset(&mut self) {
         self.0.reset();
     }
+
+    pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
+        self.0.try_next().map(|value| value.map(DoubleIterationValue::from))
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for DoubleAllValuesIterator<H> {
+impl<H: IterableHistogram> Iterator for DoubleAllValuesIterator<H> {
     type Item = DoubleIterationValue;
 
     fn next(&mut self) -> Option<DoubleIterationValue> {
@@ -300,9 +346,13 @@ impl<H: ReadableHistogram> DoubleRecordedValuesIterator<H> {
     pub fn reset(&mut self) {
         self.0.reset();
     }
+
+    pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
+        self.0.try_next().map(|value| value.map(DoubleIterationValue::from))
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for DoubleRecordedValuesIterator<H> {
+impl<H: IterableHistogram> Iterator for DoubleRecordedValuesIterator<H> {
     type Item = DoubleIterationValue;
 
     fn next(&mut self) -> Option<DoubleIterationValue> {
@@ -329,9 +379,13 @@ impl<H: ReadableHistogram> DoubleLinearIterator<H> {
         let units = double_value_units_to_integer_units(self.0.histogram(), value_units_per_bucket);
         self.0.reset(units);
     }
+
+    pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
+        self.0.try_next().map(|value| value.map(DoubleIterationValue::from))
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for DoubleLinearIterator<H> {
+impl<H: IterableHistogram> Iterator for DoubleLinearIterator<H> {
     type Item = DoubleIterationValue;
 
     fn next(&mut self) -> Option<DoubleIterationValue> {
@@ -358,9 +412,13 @@ impl<H: ReadableHistogram> DoubleLogarithmicIterator<H> {
         let units = double_value_units_to_integer_units(self.0.histogram(), value_units_in_first_bucket);
         self.0.reset(units, log_base);
     }
+
+    pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
+        self.0.try_next().map(|value| value.map(DoubleIterationValue::from))
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for DoubleLogarithmicIterator<H> {
+impl<H: IterableHistogram> Iterator for DoubleLogarithmicIterator<H> {
     type Item = DoubleIterationValue;
 
     fn next(&mut self) -> Option<DoubleIterationValue> {
@@ -384,9 +442,13 @@ impl<H: ReadableHistogram> DoublePercentileIterator<H> {
     pub fn reset(&mut self, percentile_ticks_per_half_distance: u32) {
         self.0.reset(percentile_ticks_per_half_distance);
     }
+
+    pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
+        self.0.try_next().map(|value| value.map(DoubleIterationValue::from))
+    }
 }
 
-impl<H: ReadableHistogram> Iterator for DoublePercentileIterator<H> {
+impl<H: IterableHistogram> Iterator for DoublePercentileIterator<H> {
     type Item = DoubleIterationValue;
 
     fn next(&mut self) -> Option<DoubleIterationValue> {

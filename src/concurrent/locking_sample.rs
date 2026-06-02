@@ -1,4 +1,4 @@
-use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramImpl, ConcurrentDoubleReadView};
+use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramImpl, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::recorder::{DoubleRecorder, Recorder, SingleWriterDoubleRecorder, SingleWriterRecorder};
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
@@ -114,24 +114,28 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
         }
     }
 
-    pub fn histogram(&self) -> &ConcurrentDoubleHistogramImpl<P> {
+    fn raw_histogram(&self) -> &ConcurrentDoubleHistogramImpl<P> {
         unsafe { &*self.histogram.load(Ordering::Acquire) }
     }
 
-    /// Return a read-only view of the most recently sampled histogram.
+    pub fn histogram(&self) -> ConcurrentDoubleSnapshot<'_, P> {
+        ConcurrentDoubleSnapshot::new(self.raw_histogram())
+    }
+
+    /// Return a read-only snapshot of the most recently sampled histogram.
     ///
     /// This is an alias for [`histogram`](Self::histogram) with the same naming
     /// convention as the integer recorder sample types.
-    pub fn snapshot(&self) -> &ConcurrentDoubleHistogramImpl<P> {
+    pub fn snapshot(&self) -> ConcurrentDoubleSnapshot<'_, P> {
         self.histogram()
     }
 
     pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram().percentiles_snapshot(percentile_ticks_per_half_distance)
+        self.raw_histogram().percentiles_snapshot(percentile_ticks_per_half_distance)
     }
 
     pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram().linear_bucket_values_snapshot(value_units_per_bucket)
+        self.raw_histogram().linear_bucket_values_snapshot(value_units_per_bucket)
     }
 
     pub fn logarithmic_bucket_values(
@@ -139,16 +143,16 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
         value_units_in_first_bucket: f64,
         log_base: f64,
     ) -> DoubleLogarithmicIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram()
+        self.raw_histogram()
             .logarithmic_bucket_values_snapshot(value_units_in_first_bucket, log_base)
     }
 
     pub fn all_values(&self) -> DoubleAllValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram().all_values_snapshot()
+        self.raw_histogram().all_values_snapshot()
     }
 
     pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram().recorded_values_snapshot()
+        self.raw_histogram().recorded_values_snapshot()
     }
 }
 

@@ -10,6 +10,9 @@
 //! and can then lock and read the data by calling
 //! ```let rg = ri.reader_lock()```
 //! before finally calling `rg.flip()` once they are done executing the swap.
+//!
+//! Unlike Java's `WriterReaderPhaser`, this reader lock is not reentrant. Do not
+//! acquire another reader lock on the same phaser while holding a `PhaseFlipGuard`.
 
 use parking_lot::{Mutex, MutexGuard};
 use std::mem;

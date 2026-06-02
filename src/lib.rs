@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(private_bounds)]
 #![recursion_limit = "128"]
 
 //! Rust port of HdrHistogram with integer, double, concurrent recorder, and
@@ -33,15 +34,17 @@ pub mod iteration;
 pub mod st;
 
 pub use crate::concurrent::{
-    ConcurrentDoubleHistogram, ConcurrentDoubleReadView, DoubleLockingSample, DoubleRecorder, ResizableConcurrentHistogram,
-    ResizableConcurrentReadView, ResizableLockingSample, ResizableRecorder, ResizableSnapshot, SaturatingConcurrentDoubleHistogram,
-    SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleLockingSample, SingleWriterDoubleRecorder,
-    SingleWriterLockingSample, SingleWriterRecorder, StaticHistogram, StaticLockingSample, StaticRecorder, StaticSnapshot,
+    ConcurrentDoubleHistogram, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot, DoubleLockingSample, DoubleRecorder,
+    ResizableConcurrentHistogram, ResizableConcurrentReadView, ResizableLockingSample, ResizableRecorder, ResizableSnapshot,
+    SaturatingConcurrentDoubleHistogram, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleLockingSample,
+    SingleWriterDoubleRecorder, SingleWriterLockingSample, SingleWriterRecorder, StaticHistogram, StaticLockingSample, StaticRecorder,
+    StaticSnapshot,
 };
 pub use crate::core::{
     Counter, CreationError, DoubleCreationError, EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram,
-    OverflowPolicy, ReadableHistogram, RecordError, SaturateOnOverflow, ShiftError, SubtractionError, ThrowOnOverflow,
+    OverflowPolicy, RecordError, SaturateOnOverflow, ShiftError, SubtractionError, ThrowOnOverflow,
 };
+pub use crate::iteration::IterationError;
 pub use crate::st::{DoubleHistogram, DoubleHistogramImpl, Histogram, SaturatingDoubleHistogram};
 
 #[cfg(test)]

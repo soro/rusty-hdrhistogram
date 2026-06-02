@@ -5,7 +5,7 @@ use crate::concurrent::snapshot::{ResizableSnapshot, Snapshot};
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::constants::*;
 use crate::core::*;
-use crate::iteration::RecordedValuesIterator;
+use crate::iteration::{AllValuesIterator, LinearIterator, LogarithmicIterator, PercentileIterator, RecordedValuesIterator};
 use crossbeam_epoch as epoch;
 use std::ptr;
 use std::sync::atomic::AtomicBool;
@@ -968,7 +968,14 @@ impl ResizableConcurrentHistogram {
             }
         } else {
             let other_last = other_len - 1;
-            for value in RecordedValuesIterator::from_readable(self.read_view()) {
+            let mut iterator = RecordedValuesIterator::from_readable(self.read_view());
+            loop {
+                let Some(value) = (match iterator.try_next() {
+                    Ok(value) => value,
+                    Err(_) => return false,
+                }) else {
+                    break;
+                };
                 let mut other_index = other.layout.counts_array_index(value.value_iterated_to);
                 if other_index > other_last {
                     other_index = other_last;
@@ -1073,6 +1080,26 @@ impl ResizableStructuralMutation<'_> {
 }
 
 impl ResizableConcurrentReadView<'_> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+        PercentileIterator::from_readable(self, percentile_ticks_per_half_distance)
+    }
+
+    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+        LinearIterator::from_readable(self, value_units_per_bucket)
+    }
+
+    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+        LogarithmicIterator::from_readable(self, value_units_in_first_bucket, log_base)
+    }
+
+    pub fn all_values(&self) -> AllValuesIterator<&'_ Self> {
+        AllValuesIterator::from_readable(self)
+    }
+
+    pub fn recorded_values(&self) -> RecordedValuesIterator<&'_ Self> {
+        RecordedValuesIterator::from_readable(self)
+    }
+
     pub(crate) fn get_min_non_zero_value(&self) -> u64 {
         self.min_non_zero_value
     }
@@ -1089,6 +1116,10 @@ impl ReadableHistogram for ResizableConcurrentReadView<'_> {
 
     fn get_total_count(&self) -> u64 {
         self.total_count
+    }
+
+    fn current_total_count(&self) -> u64 {
+        self.histogram.total_count.load(Ordering::Relaxed)
     }
 
     fn unsafe_get_count_at_index(&self, index: u32) -> u64 {

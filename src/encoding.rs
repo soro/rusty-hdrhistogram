@@ -4,6 +4,7 @@
 //! encoding requires `encoding-compression`; Base64 helpers, histogram log
 //! reader/writer APIs, and report generation require `encoding-base64`.
 
+use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, EncodableHistogram, OverflowPolicy, ReadableHistogram};
 use crate::st::{DoubleHistogram, DoubleHistogramImpl, Histogram};
 
@@ -685,6 +686,38 @@ impl<W: Write> HistogramLogWriter<W> {
         self.writer.write_all(line.as_bytes()).map_err(EncodeError::from)
     }
 
+    pub fn write_concurrent_double_read_view_interval(
+        &mut self,
+        histogram: &ConcurrentDoubleReadView<'_>,
+        start_timestamp_sec: f64,
+        end_timestamp_sec: f64,
+    ) -> Result<(), EncodeError> {
+        let (start_timestamp_sec, end_timestamp_sec) = self.relative_interval_times(start_timestamp_sec, end_timestamp_sec);
+        let line = encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
+            histogram,
+            start_timestamp_sec,
+            end_timestamp_sec,
+            self.max_value_unit_ratio,
+        )?;
+        self.writer.write_all(line.as_bytes()).map_err(EncodeError::from)
+    }
+
+    pub fn write_concurrent_double_snapshot_interval<P: OverflowPolicy>(
+        &mut self,
+        histogram: &ConcurrentDoubleSnapshot<'_, P>,
+        start_timestamp_sec: f64,
+        end_timestamp_sec: f64,
+    ) -> Result<(), EncodeError> {
+        let (start_timestamp_sec, end_timestamp_sec) = self.relative_interval_times(start_timestamp_sec, end_timestamp_sec);
+        let line = encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio(
+            histogram,
+            start_timestamp_sec,
+            end_timestamp_sec,
+            self.max_value_unit_ratio,
+        )?;
+        self.writer.write_all(line.as_bytes()).map_err(EncodeError::from)
+    }
+
     pub fn flush(&mut self) -> Result<(), EncodeError> {
         self.writer.flush().map_err(EncodeError::from)
     }
@@ -864,14 +897,41 @@ pub fn decode_histogram_with_min_highest_trackable_value(
     Ok(histogram)
 }
 
-pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
-    let integer_encoding = encode_histogram_v2(histogram.integer_histogram())?;
+fn encode_double_histogram_v2_from_integer<H: EncodableHistogram>(
+    integer_histogram: &H,
+    number_of_significant_value_digits: u8,
+    highest_to_lowest_value_ratio: u64,
+) -> Result<Vec<u8>, EncodeError> {
+    let integer_encoding = encode_histogram_v2(integer_histogram)?;
     let mut encoded = Vec::with_capacity(16 + integer_encoding.len());
     write_u32(&mut encoded, DOUBLE_HISTOGRAM_ENCODING_COOKIE);
-    write_i32(&mut encoded, i32::from(histogram.get_number_of_significant_value_digits()));
-    write_non_negative_i64(&mut encoded, histogram.get_highest_to_lowest_value_ratio())?;
+    write_i32(&mut encoded, i32::from(number_of_significant_value_digits));
+    write_non_negative_i64(&mut encoded, highest_to_lowest_value_ratio)?;
     encoded.extend_from_slice(&integer_encoding);
     Ok(encoded)
+}
+
+pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
+    encode_double_histogram_v2_from_integer(
+        histogram.integer_histogram(),
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
+}
+
+pub fn encode_concurrent_double_read_view_v2(histogram: &ConcurrentDoubleReadView<'_>) -> Result<Vec<u8>, EncodeError> {
+    encode_double_histogram_v2_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
+}
+
+pub fn encode_concurrent_double_snapshot_v2<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+) -> Result<Vec<u8>, EncodeError> {
+    let view = histogram.read_view();
+    encode_concurrent_double_read_view_v2(&view)
 }
 
 pub fn decode_double_histogram_v2(bytes: &[u8]) -> Result<DoubleHistogram, DecodeError> {
@@ -937,12 +997,61 @@ pub fn decode_histogram_compressed_with_min_highest_trackable_value(
 }
 
 #[cfg(feature = "encoding-compression")]
-pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
-    let integer_encoding = encode_histogram_compressed(histogram.integer_histogram())?;
+fn encode_double_histogram_compressed_from_integer<H: EncodableHistogram>(
+    integer_histogram: &H,
+    number_of_significant_value_digits: u8,
+    highest_to_lowest_value_ratio: u64,
+) -> Result<Vec<u8>, EncodeError> {
+    let integer_encoding = encode_histogram_compressed(integer_histogram)?;
     let mut encoded = Vec::with_capacity(16 + integer_encoding.len());
     write_u32(&mut encoded, DOUBLE_HISTOGRAM_COMPRESSED_ENCODING_COOKIE);
-    write_i32(&mut encoded, i32::from(histogram.get_number_of_significant_value_digits()));
-    write_non_negative_i64(&mut encoded, histogram.get_highest_to_lowest_value_ratio())?;
+    write_i32(&mut encoded, i32::from(number_of_significant_value_digits));
+    write_non_negative_i64(&mut encoded, highest_to_lowest_value_ratio)?;
+    encoded.extend_from_slice(&integer_encoding);
+    Ok(encoded)
+}
+
+#[cfg(feature = "encoding-compression")]
+pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<Vec<u8>, EncodeError> {
+    encode_double_histogram_compressed_from_integer(
+        histogram.integer_histogram(),
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
+}
+
+#[cfg(feature = "encoding-compression")]
+pub fn encode_concurrent_double_read_view_compressed(histogram: &ConcurrentDoubleReadView<'_>) -> Result<Vec<u8>, EncodeError> {
+    encode_double_histogram_compressed_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
+}
+
+#[cfg(feature = "encoding-compression")]
+pub fn encode_concurrent_double_snapshot_compressed<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+) -> Result<Vec<u8>, EncodeError> {
+    let view = histogram.read_view();
+    encode_concurrent_double_read_view_compressed(&view)
+}
+
+#[cfg(feature = "encoding-compression")]
+fn encode_double_histogram_compressed_with_level_from_integer<H: EncodableHistogram>(
+    integer_histogram: &H,
+    number_of_significant_value_digits: u8,
+    highest_to_lowest_value_ratio: u64,
+    compression_level: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    if compression_level > 9 {
+        return Err(EncodeError::InvalidCompressionLevel(compression_level));
+    }
+    let integer_encoding = encode_histogram_compressed_with_level(integer_histogram, compression_level)?;
+    let mut encoded = Vec::with_capacity(16 + integer_encoding.len());
+    write_u32(&mut encoded, DOUBLE_HISTOGRAM_COMPRESSED_ENCODING_COOKIE);
+    write_i32(&mut encoded, i32::from(number_of_significant_value_digits));
+    write_non_negative_i64(&mut encoded, highest_to_lowest_value_ratio)?;
     encoded.extend_from_slice(&integer_encoding);
     Ok(encoded)
 }
@@ -952,16 +1061,34 @@ pub fn encode_double_histogram_compressed_with_level<P: OverflowPolicy>(
     histogram: &DoubleHistogramImpl<P>,
     compression_level: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    if compression_level > 9 {
-        return Err(EncodeError::InvalidCompressionLevel(compression_level));
-    }
-    let integer_encoding = encode_histogram_compressed_with_level(histogram.integer_histogram(), compression_level)?;
-    let mut encoded = Vec::with_capacity(16 + integer_encoding.len());
-    write_u32(&mut encoded, DOUBLE_HISTOGRAM_COMPRESSED_ENCODING_COOKIE);
-    write_i32(&mut encoded, i32::from(histogram.get_number_of_significant_value_digits()));
-    write_non_negative_i64(&mut encoded, histogram.get_highest_to_lowest_value_ratio())?;
-    encoded.extend_from_slice(&integer_encoding);
-    Ok(encoded)
+    encode_double_histogram_compressed_with_level_from_integer(
+        histogram.integer_histogram(),
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+        compression_level,
+    )
+}
+
+#[cfg(feature = "encoding-compression")]
+pub fn encode_concurrent_double_read_view_compressed_with_level(
+    histogram: &ConcurrentDoubleReadView<'_>,
+    compression_level: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    encode_double_histogram_compressed_with_level_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+        compression_level,
+    )
+}
+
+#[cfg(feature = "encoding-compression")]
+pub fn encode_concurrent_double_snapshot_compressed_with_level<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+    compression_level: u32,
+) -> Result<Vec<u8>, EncodeError> {
+    let view = histogram.read_view();
+    encode_concurrent_double_read_view_compressed_with_level(&view, compression_level)
 }
 
 #[cfg(feature = "encoding-compression")]
@@ -1001,6 +1128,18 @@ pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram<u64>, DecodeEr
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogramImpl<P>) -> Result<String, EncodeError> {
     Ok(BASE64_STANDARD.encode(encode_double_histogram_compressed(histogram)?))
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_read_view_base64(histogram: &ConcurrentDoubleReadView<'_>) -> Result<String, EncodeError> {
+    Ok(BASE64_STANDARD.encode(encode_concurrent_double_read_view_compressed(histogram)?))
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_snapshot_base64<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+) -> Result<String, EncodeError> {
+    Ok(BASE64_STANDARD.encode(encode_concurrent_double_snapshot_compressed(histogram)?))
 }
 
 #[cfg(feature = "encoding-base64")]
@@ -1091,6 +1230,68 @@ pub fn encode_double_histogram_log_line_with_max_value_unit_ratio<P: OverflowPol
         end_timestamp_sec,
         histogram.get_max_value() / checked_max_value_unit_ratio(max_value_unit_ratio)?,
         &payload,
+    )
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_read_view_log_line(
+    histogram: &ConcurrentDoubleReadView<'_>,
+    start_timestamp_sec: f64,
+    end_timestamp_sec: f64,
+) -> Result<String, EncodeError> {
+    encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
+        histogram,
+        start_timestamp_sec,
+        end_timestamp_sec,
+        DEFAULT_LOG_MAX_VALUE_UNIT_RATIO,
+    )
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
+    histogram: &ConcurrentDoubleReadView<'_>,
+    start_timestamp_sec: f64,
+    end_timestamp_sec: f64,
+    max_value_unit_ratio: f64,
+) -> Result<String, EncodeError> {
+    let compressed = encode_concurrent_double_read_view_compressed_with_level(histogram, 9)?;
+    let payload = BASE64_STANDARD.encode(compressed);
+    encode_log_line(
+        None,
+        start_timestamp_sec,
+        end_timestamp_sec,
+        histogram.get_max_value() / checked_max_value_unit_ratio(max_value_unit_ratio)?,
+        &payload,
+    )
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_snapshot_log_line<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+    start_timestamp_sec: f64,
+    end_timestamp_sec: f64,
+) -> Result<String, EncodeError> {
+    encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio(
+        histogram,
+        start_timestamp_sec,
+        end_timestamp_sec,
+        DEFAULT_LOG_MAX_VALUE_UNIT_RATIO,
+    )
+}
+
+#[cfg(feature = "encoding-base64")]
+pub fn encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio<P: OverflowPolicy>(
+    histogram: &ConcurrentDoubleSnapshot<'_, P>,
+    start_timestamp_sec: f64,
+    end_timestamp_sec: f64,
+    max_value_unit_ratio: f64,
+) -> Result<String, EncodeError> {
+    let view = histogram.read_view();
+    encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
+        &view,
+        start_timestamp_sec,
+        end_timestamp_sec,
+        max_value_unit_ratio,
     )
 }
 

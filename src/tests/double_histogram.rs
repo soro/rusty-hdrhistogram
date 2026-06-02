@@ -158,10 +158,10 @@ impl TestDoubleHistogram for ConcurrentDoubleHistogram {
         ConcurrentDoubleHistogram::get_max_value(self)
     }
     fn get_mean(&self) -> f64 {
-        ConcurrentDoubleHistogram::get_mean(self)
+        ConcurrentDoubleHistogram::try_get_mean(self).unwrap()
     }
     fn get_std_deviation(&self) -> f64 {
-        ConcurrentDoubleHistogram::get_std_deviation(self)
+        ConcurrentDoubleHistogram::try_get_std_deviation(self).unwrap()
     }
     fn get_value_at_percentile(&self, percentile: f64) -> f64 {
         ConcurrentDoubleHistogram::get_value_at_percentile(self, percentile)

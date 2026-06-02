@@ -1,11 +1,15 @@
 use crate::core::{HistogramMetaData, HistogramSettings};
 
-pub trait ReadableHistogram {
+pub(crate) trait ReadableHistogram {
     // required for iteration
     fn settings(&self) -> HistogramSettings;
     fn array_length(&self) -> u32;
     fn get_total_count(&self) -> u64;
     fn unsafe_get_count_at_index(&self, idx: u32) -> u64;
+
+    fn current_total_count(&self) -> u64 {
+        self.get_total_count()
+    }
 
     fn get_max_value(&self) -> u64;
 
@@ -51,6 +55,10 @@ impl<T: ReadableHistogram + ?Sized> ReadableHistogram for &T {
 
     fn unsafe_get_count_at_index(&self, idx: u32) -> u64 {
         (**self).unsafe_get_count_at_index(idx)
+    }
+
+    fn current_total_count(&self) -> u64 {
+        (**self).current_total_count()
     }
 
     fn get_max_value(&self) -> u64 {

@@ -11,24 +11,24 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
         Snapshot(histogram)
     }
 
-    pub(crate) fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ T> {
-        PercentileIterator::from_readable(self.0, percentile_ticks_per_half_distance)
+    pub(crate) fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+        PercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub(crate) fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ T> {
-        LinearIterator::from_readable(self.0, value_units_per_bucket)
+    pub(crate) fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+        LinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub(crate) fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ T> {
-        LogarithmicIterator::from_readable(self.0, value_units_in_first_bucket, log_base)
+    pub(crate) fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+        LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 
-    pub(crate) fn all_values(&self) -> AllValuesIterator<&'_ T> {
-        AllValuesIterator::from_readable(self.0)
+    pub(crate) fn all_values(&self) -> AllValuesIterator<&'_ Self> {
+        AllValuesIterator::new(self)
     }
 
-    pub(crate) fn recorded_values(&self) -> RecordedValuesIterator<&'_ T> {
-        RecordedValuesIterator::from_readable(self.0)
+    pub(crate) fn recorded_values(&self) -> RecordedValuesIterator<&'_ Self> {
+        RecordedValuesIterator::new(self)
     }
 
     pub(crate) fn equals(&self, other: &Snapshot<'_, T>) -> bool {
@@ -92,6 +92,8 @@ impl<'a, T: RecordableHistogram> ReadableHistogram for Snapshot<'a, T> {
     }
 }
 
+impl<'a, T: RecordableHistogram> IterableHistogram for Snapshot<'a, T> {}
+
 pub struct StaticSnapshot<'a>(Snapshot<'a, StaticHistogram>);
 
 pub struct ResizableSnapshot<'a>(Snapshot<'a, ResizableConcurrentHistogram>);
@@ -103,28 +105,24 @@ macro_rules! impl_snapshot_wrapper {
                 $snapshot(snapshot)
             }
 
-            pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ $histogram> {
-                self.0.percentiles(percentile_ticks_per_half_distance)
+            pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+                PercentileIterator::new(self, percentile_ticks_per_half_distance)
             }
 
-            pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ $histogram> {
-                self.0.linear_bucket_values(value_units_per_bucket)
+            pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+                LinearIterator::new(self, value_units_per_bucket)
             }
 
-            pub fn logarithmic_bucket_values(
-                &self,
-                value_units_in_first_bucket: u64,
-                log_base: f64,
-            ) -> LogarithmicIterator<&'_ $histogram> {
-                self.0.logarithmic_bucket_values(value_units_in_first_bucket, log_base)
+            pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+                LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
             }
 
-            pub fn all_values(&self) -> AllValuesIterator<&'_ $histogram> {
-                self.0.all_values()
+            pub fn all_values(&self) -> AllValuesIterator<&'_ Self> {
+                AllValuesIterator::new(self)
             }
 
-            pub fn recorded_values(&self) -> RecordedValuesIterator<&'_ $histogram> {
-                self.0.recorded_values()
+            pub fn recorded_values(&self) -> RecordedValuesIterator<&'_ Self> {
+                RecordedValuesIterator::new(self)
             }
 
             pub fn equals(&self, other: &Self) -> bool {

@@ -11,6 +11,7 @@ use crate::core::*;
 use crate::st::{DoubleHistogramImpl, Histogram};
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 static REPORTER_INSTANCE_SEQUENCER: AtomicUsize = AtomicUsize::new(0);
 fn get_instance_id() -> usize {
@@ -284,7 +285,8 @@ impl Drop for SingleWriterSamplingGuard<'_> {
 }
 
 impl<T: RecordableHistogram> Recorder<T> {
-    pub(crate) fn from_histogram(histogram: T) -> Recorder<T> {
+    pub(crate) fn from_histogram(mut histogram: T) -> Recorder<T> {
+        histogram.meta_data_mut().set_start_now();
         Recorder {
             instance_id: get_instance_id(),
             core: RecorderCore::from_histogram(histogram),
@@ -348,12 +350,13 @@ impl<T: RecordableHistogram> Recorder<T> {
     }
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(&self, inactive_histogram: *mut T, flip_guard: &PhaseFlipGuard<'a>) -> *mut T {
+        let now = SystemTime::now();
+        unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
-        unsafe { (*inactive_histogram).meta_data_mut().set_start_now() };
 
         flip_guard.flip();
 
-        unsafe { (*active_histogram).meta_data_mut().set_end_now() };
+        unsafe { (*active_histogram).meta_data_mut().set_end_timestamp(now) };
         active_histogram
     }
 }
@@ -428,9 +431,10 @@ impl SingleWriterRecorder {
             .map(Self::from_histogram)
     }
 
-    pub fn from_histogram(histogram: Histogram<u64>) -> Self {
+    pub fn from_histogram(mut histogram: Histogram<u64>) -> Self {
         let inactive_settings = histogram.settings().clone();
         let inactive_integer_to_double_value_conversion_ratio = histogram.integer_to_double_value_conversion_ratio();
+        histogram.meta_data.set_start_now();
         SingleWriterRecorder {
             instance_id: get_instance_id(),
             core: SingleWriterCore::from_histogram(histogram),
@@ -511,18 +515,20 @@ impl SingleWriterRecorder {
         flip_guard: &PhaseFlipGuard<'a>,
     ) -> *mut Histogram<u64> {
         let _access = self.core.begin_sampling();
+        let now = SystemTime::now();
+        unsafe { (*inactive_histogram).meta_data.set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
-        unsafe { (*inactive_histogram).meta_data.set_start_now() };
 
         flip_guard.flip();
 
-        unsafe { (*active_histogram).meta_data.set_end_now() };
+        unsafe { (*active_histogram).meta_data.set_end_timestamp(now) };
         active_histogram
     }
 }
 
 impl<P: OverflowPolicy> DoubleRecorder<P> {
-    pub fn from_histogram(histogram: ConcurrentDoubleHistogramImpl<P>) -> Self {
+    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramImpl<P>) -> Self {
+        histogram.meta_data_mut().set_start_now();
         DoubleRecorder {
             instance_id: get_instance_id(),
             core: RecorderCore::from_histogram(histogram),
@@ -589,8 +595,11 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
         inactive_histogram: *mut ConcurrentDoubleHistogramImpl<P>,
         flip_guard: &PhaseFlipGuard<'a>,
     ) -> *mut ConcurrentDoubleHistogramImpl<P> {
+        let now = SystemTime::now();
+        unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
         flip_guard.flip();
+        unsafe { (*active_histogram).meta_data_mut().set_end_timestamp(now) };
         active_histogram
     }
 }
@@ -608,10 +617,11 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
             .map(Self::from_histogram)
     }
 
-    pub fn from_histogram(histogram: DoubleHistogramImpl<P>) -> Self {
+    pub fn from_histogram(mut histogram: DoubleHistogramImpl<P>) -> Self {
         let inactive_highest_to_lowest_value_ratio = histogram.get_highest_to_lowest_value_ratio();
         let inactive_number_of_significant_value_digits = histogram.get_number_of_significant_value_digits();
         let inactive_auto_resize = histogram.is_auto_resize();
+        histogram.meta_data_mut().set_start_now();
         SingleWriterDoubleRecorder {
             instance_id: get_instance_id(),
             core: SingleWriterCore::from_histogram(histogram),
@@ -697,8 +707,11 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
         flip_guard: &PhaseFlipGuard<'a>,
     ) -> *mut DoubleHistogramImpl<P> {
         let _access = self.core.begin_sampling();
+        let now = SystemTime::now();
+        unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
         flip_guard.flip();
+        unsafe { (*active_histogram).meta_data_mut().set_end_timestamp(now) };
         active_histogram
     }
 }

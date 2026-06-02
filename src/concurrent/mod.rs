@@ -17,7 +17,8 @@ mod static_histogram;
 pub(crate) mod writer_reader_phaser;
 
 pub use self::double_histogram::{
-    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramImpl, ConcurrentDoubleReadView, SaturatingConcurrentDoubleHistogram,
+    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramImpl, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot,
+    SaturatingConcurrentDoubleHistogram,
 };
 pub use self::locking_sample::{
     DoubleLockingSample, ResizableLockingSample, SingleWriterDoubleLockingSample, SingleWriterLockingSample, StaticLockingSample,

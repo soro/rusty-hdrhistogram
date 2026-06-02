@@ -34,18 +34,38 @@ fn double_recorder_records_and_resamples() {
     assert_eq!(3, sample.histogram().get_total_count());
     assert_eq!(1, sample.histogram().get_count_at_value(1.5));
     assert_eq!(2, sample.histogram().get_count_at_value(12.0));
-    assert_eq!(
-        3,
-        sample
-            .recorded_values()
-            .map(|value| value.count_added_in_this_iteration_step)
-            .sum::<u64>()
-    );
+    let recorded_count = {
+        let mut recorded_values = sample.recorded_values();
+        let mut recorded_count = 0;
+        while let Some(value) = recorded_values.try_next().unwrap() {
+            recorded_count += value.count_added_in_this_iteration_step;
+        }
+        recorded_count
+    };
+    assert_eq!(3, recorded_count);
 
     succ!(recorder.record_value(24.0));
     sample = sample.resample();
     assert_eq!(1, sample.histogram().get_total_count());
     assert_eq!(1, sample.histogram().get_count_at_value(24.0));
+}
+
+#[test]
+fn double_recorder_interval_timestamps_are_contiguous() {
+    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+
+    succ!(recorder.record_value(1.5));
+    let mut sample = recorder.locking_sample();
+    let first_start = sample.histogram().meta_data().start_timestamp.unwrap();
+    let first_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    assert!(first_end >= first_start);
+
+    succ!(recorder.record_value(2.5));
+    sample = sample.resample();
+    let second_start = sample.histogram().meta_data().start_timestamp.unwrap();
+    let second_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    assert_eq!(first_end, second_start);
+    assert!(second_end >= second_start);
 }
 
 #[test]
@@ -102,6 +122,42 @@ fn single_writer_recorder_records_and_resamples() {
     assert_eq!(7, first_total);
     assert_eq!(1, sample.histogram().get_total_count());
     assert_eq!(Some(1), sample.histogram().get_count_at_value(500));
+}
+
+#[test]
+fn single_writer_recorder_interval_timestamps_are_contiguous() {
+    let recorder = recorder::single_writer_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+
+    succ!(recorder.record_value(100));
+    let mut sample = recorder.locking_sample();
+    let first_start = sample.histogram().meta_data.start_timestamp.unwrap();
+    let first_end = sample.histogram().meta_data.end_timestamp.unwrap();
+    assert!(first_end >= first_start);
+
+    succ!(recorder.record_value(200));
+    sample = sample.resample();
+    let second_start = sample.histogram().meta_data.start_timestamp.unwrap();
+    let second_end = sample.histogram().meta_data.end_timestamp.unwrap();
+    assert_eq!(first_end, second_start);
+    assert!(second_end >= second_start);
+}
+
+#[test]
+fn single_writer_double_recorder_interval_timestamps_are_contiguous() {
+    let recorder = recorder::single_writer_double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+
+    succ!(recorder.record_value(1.5));
+    let mut sample = recorder.locking_sample();
+    let first_start = sample.histogram().integer_histogram().meta_data.start_timestamp.unwrap();
+    let first_end = sample.histogram().integer_histogram().meta_data.end_timestamp.unwrap();
+    assert!(first_end >= first_start);
+
+    succ!(recorder.record_value(2.5));
+    sample = sample.resample();
+    let second_start = sample.histogram().integer_histogram().meta_data.start_timestamp.unwrap();
+    let second_end = sample.histogram().integer_histogram().meta_data.end_timestamp.unwrap();
+    assert_eq!(first_end, second_start);
+    assert!(second_end >= second_start);
 }
 
 #[test]
@@ -323,6 +379,24 @@ fn clear_counts_resets_metadata() {
     assert!(meta_data.tag.is_none());
     assert!(meta_data.start_timestamp.is_none());
     assert!(meta_data.end_timestamp.is_none());
+}
+
+#[test]
+fn concurrent_recorder_interval_timestamps_are_contiguous() {
+    let recorder = recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+
+    succ!(recorder.record_value(100));
+    let mut sample = recorder.locking_sample();
+    let first_start = sample.histogram().meta_data().start_timestamp.unwrap();
+    let first_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    assert!(first_end >= first_start);
+
+    succ!(recorder.record_value(200));
+    sample = sample.resample();
+    let second_start = sample.histogram().meta_data().start_timestamp.unwrap();
+    let second_end = sample.histogram().meta_data().end_timestamp.unwrap();
+    assert_eq!(first_end, second_start);
+    assert!(second_end >= second_start);
 }
 
 macro_rules! recorder_test {

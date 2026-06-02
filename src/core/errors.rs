@@ -22,6 +22,7 @@ pub enum RecordError {
     ValueOutOfRangeResizeDisabled,
     ResizeFailed(CreationError),
     DoubleCreationFailed(DoubleCreationError),
+    ConcurrentModification,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +83,7 @@ impl fmt::Display for RecordError {
             RecordError::ValueOutOfRangeResizeDisabled => write!(f, "value is outside the trackable range and auto-resize is disabled"),
             RecordError::ResizeFailed(err) => write!(f, "failed to resize histogram while recording: {}", err),
             RecordError::DoubleCreationFailed(err) => write!(f, "failed to create internal double histogram while recording: {}", err),
+            RecordError::ConcurrentModification => write!(f, "source histogram was modified concurrently while recording"),
         }
     }
 }
@@ -91,7 +93,7 @@ impl Error for RecordError {
         match self {
             RecordError::ResizeFailed(err) => Some(err),
             RecordError::DoubleCreationFailed(err) => Some(err),
-            RecordError::ValueOutOfRangeResizeDisabled => None,
+            RecordError::ValueOutOfRangeResizeDisabled | RecordError::ConcurrentModification => None,
         }
     }
 }

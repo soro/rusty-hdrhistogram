@@ -1,4 +1,4 @@
-use crate::concurrent::ResizableConcurrentHistogram;
+use crate::concurrent::{recorder, ResizableConcurrentHistogram};
 use crate::core::histogram_settings::{HistogramSettings, V2_ENCODING_HEADER_SIZE, V2_ENCODING_MAX_WORD_SIZE_IN_BYTES};
 use crate::encoding::*;
 use crate::st::{DoubleHistogram, Histogram};
@@ -93,6 +93,23 @@ fn double_histogram_v2_roundtrip_preserves_counts() {
     assert_eq!(histogram.get_count_at_value(12.0), decoded.get_count_at_value(12.0));
     assert_eq!(histogram.get_count_at_value(128.0), decoded.get_count_at_value(128.0));
     assert!(histogram.values_are_equivalent(histogram.get_value_at_percentile(100.0), decoded.get_value_at_percentile(100.0)));
+}
+
+#[test]
+fn concurrent_double_snapshot_v2_roundtrip_preserves_counts() {
+    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    recorder.record_value_with_count(1.5, 2).unwrap();
+    recorder.record_value(12.0).unwrap();
+
+    let sample = recorder.locking_sample();
+    let snapshot = sample.snapshot();
+    let encoded = encode_concurrent_double_snapshot_v2(&snapshot).unwrap();
+    assert_eq!(&encoded[..4], &DOUBLE_HISTOGRAM_ENCODING_COOKIE.to_be_bytes());
+
+    let decoded = decode_double_histogram_v2(&encoded).unwrap();
+    assert_eq!(snapshot.get_total_count(), decoded.get_total_count());
+    assert_eq!(snapshot.get_count_at_value(1.5), decoded.get_count_at_value(1.5));
+    assert_eq!(snapshot.get_count_at_value(12.0), decoded.get_count_at_value(12.0));
 }
 
 #[test]
@@ -486,6 +503,52 @@ fn histogram_log_report_rejects_invalid_config() {
     assert!(matches!(
         generate_histogram_log_report([""].iter().copied(), &config),
         Err(DecodeError::InvalidLogLine(_))
+    ));
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
+    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    recorder.record_value_with_count(1.5, 2).unwrap();
+    recorder.record_value(12.0).unwrap();
+
+    let sample = recorder.locking_sample();
+    let snapshot = sample.snapshot();
+    let line = encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio(&snapshot, 40.0, 41.0, 1.0).unwrap();
+    let record = decode_histogram_log_line(&line).unwrap().unwrap();
+
+    match record {
+        HistogramLogRecord::Interval(entry) => match entry.histogram {
+            DecodedHistogram::Double(decoded) => {
+                assert_eq!(snapshot.get_total_count(), decoded.get_total_count());
+                assert_eq!(snapshot.get_count_at_value(1.5), decoded.get_count_at_value(1.5));
+                assert_eq!(snapshot.get_count_at_value(12.0), decoded.get_count_at_value(12.0));
+            }
+            DecodedHistogram::Integer(_) => panic!("decoded concurrent double snapshot as integer histogram"),
+        },
+        _ => panic!("decoded concurrent double snapshot log line as non-interval record"),
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_writer_accepts_concurrent_double_snapshot() {
+    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    recorder.record_value(1.5).unwrap();
+
+    let sample = recorder.locking_sample();
+    let snapshot = sample.snapshot();
+    let mut output = Vec::new();
+    {
+        let mut writer = HistogramLogWriter::new(&mut output);
+        writer.write_concurrent_double_snapshot_interval(&snapshot, 10.0, 11.0).unwrap();
+    }
+    let line = String::from_utf8(output).unwrap();
+    assert!(line.contains("HIST"));
+    assert!(matches!(
+        decode_histogram_log_line(&line).unwrap().unwrap(),
+        HistogramLogRecord::Interval(_)
     ));
 }
 
