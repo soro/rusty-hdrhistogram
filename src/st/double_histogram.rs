@@ -1,5 +1,8 @@
 use crate::core::{DoubleCreationError, OverflowPolicy, RecordError, SaturateOnOverflow, ThrowOnOverflow};
-use crate::iteration::RecordedValuesIterator;
+use crate::iteration::{
+    DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
+    RecordedValuesIterator,
+};
 use crate::st::Histogram;
 use std::marker::PhantomData;
 use std::sync::OnceLock;
@@ -100,16 +103,11 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
             return Err(DoubleCreationError::HighestToLowestValueRatioTooLarge);
         }
 
-        let integer_value_range =
-            derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
-                .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
+        let integer_value_range = derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+            .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
         let highest_trackable_value = integer_value_range - 1;
-        let integer_histogram = Histogram::<u64>::with_low_high_sigvdig(
-            1,
-            highest_trackable_value,
-            number_of_significant_value_digits,
-        )
-        .map_err(DoubleCreationError::Internal)?;
+        let integer_histogram = Histogram::<u64>::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
+            .map_err(DoubleCreationError::Internal)?;
         let mut histogram = DoubleHistogramImpl {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
@@ -123,8 +121,52 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         Ok(histogram)
     }
 
+    pub(crate) fn from_integer_histogram(
+        highest_to_lowest_value_ratio: u64,
+        number_of_significant_value_digits: u8,
+        integer_histogram: Histogram<u64>,
+    ) -> Result<Self, DoubleCreationError> {
+        if highest_to_lowest_value_ratio < 2 {
+            return Err(DoubleCreationError::HighestToLowestValueRatioTooSmall);
+        }
+        if number_of_significant_value_digits > 5 {
+            return Err(DoubleCreationError::SignificantValueDigitsExceedsMax);
+        }
+        let sig_digits_factor = 10_u128.pow(number_of_significant_value_digits as u32);
+        let ratio_check = (highest_to_lowest_value_ratio as u128) * sig_digits_factor;
+        if ratio_check >= (1_u128 << 61) {
+            return Err(DoubleCreationError::HighestToLowestValueRatioTooLarge);
+        }
+
+        let integer_value_range = derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+            .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
+        if integer_histogram.get_lowest_discernible_value() != 1
+            || integer_histogram.get_highest_trackable_value() != integer_value_range - 1
+            || integer_histogram.get_number_of_significant_value_digits() != number_of_significant_value_digits as u32
+        {
+            return Err(DoubleCreationError::InternalHistogramMismatch);
+        }
+
+        let integer_to_double_ratio = integer_histogram.integer_to_double_value_conversion_ratio();
+        if !integer_to_double_ratio.is_finite() || integer_to_double_ratio <= 0.0 {
+            return Err(DoubleCreationError::InternalHistogramMismatch);
+        }
+        let current_lowest_value_in_auto_range = integer_to_double_ratio * integer_histogram.lowest_tracking_integer_value() as f64;
+        let internal_ratio = derive_internal_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio);
+
+        Ok(DoubleHistogramImpl {
+            integer_histogram,
+            configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
+            current_lowest_value_in_auto_range,
+            current_highest_value_limit_in_auto_range: current_lowest_value_in_auto_range * internal_ratio as f64,
+            auto_resize: true,
+            _policy: PhantomData,
+        })
+    }
+
+    #[inline(always)]
     pub fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
-        self.record_value_with_count(value, 1)
+        self.record_single_value(value)
     }
 
     pub fn record_value_with_count(&mut self, value: f64, count: u64) -> Result<(), RecordError> {
@@ -154,9 +196,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     }
 
     pub fn get_max_value(&self) -> f64 {
-        self.highest_equivalent_value(
-            self.integer_histogram.get_max_value() as f64 * self.get_integer_to_double_value_conversion_ratio(),
-        )
+        self.highest_equivalent_value(self.integer_histogram.get_max_value() as f64 * self.get_integer_to_double_value_conversion_ratio())
     }
 
     pub fn get_mean(&self) -> f64 {
@@ -168,14 +208,12 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     }
 
     pub fn get_value_at_percentile(&self, percentile: f64) -> f64 {
-        self.integer_histogram.get_value_at_percentile(percentile) as f64
-            * self.get_integer_to_double_value_conversion_ratio()
+        self.integer_histogram.get_value_at_percentile(percentile) as f64 * self.get_integer_to_double_value_conversion_ratio()
     }
 
     pub fn get_percentile_at_or_below_value(&self, value: f64) -> f64 {
         let integer_value = self.to_integer_value_clamped(value);
-        self.integer_histogram
-            .get_percentile_at_or_below_value(integer_value)
+        self.integer_histogram.get_percentile_at_or_below_value(integer_value)
     }
 
     pub fn size_of_equivalent_value_range(&self, value: f64) -> f64 {
@@ -185,8 +223,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     }
 
     pub fn lowest_equivalent_value(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .lowest_equivalent_value(self.to_integer_value_clamped(value)) as f64
+        self.integer_histogram.lowest_equivalent_value(self.to_integer_value_clamped(value)) as f64
             * self.get_integer_to_double_value_conversion_ratio()
     }
 
@@ -200,8 +237,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     }
 
     pub fn median_equivalent_value(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .median_equivalent_value(self.to_integer_value_clamped(value)) as f64
+        self.integer_histogram.median_equivalent_value(self.to_integer_value_clamped(value)) as f64
             * self.get_integer_to_double_value_conversion_ratio()
     }
 
@@ -223,6 +259,10 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
 
     pub fn get_number_of_significant_value_digits(&self) -> u8 {
         self.integer_histogram.get_number_of_significant_value_digits() as u8
+    }
+
+    pub(crate) fn integer_histogram(&self) -> &Histogram<u64> {
+        &self.integer_histogram
     }
 
     pub(crate) fn bucket_count(&self) -> u32 {
@@ -257,10 +297,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         Ok(())
     }
 
-    pub fn copy_corrected_for_coordinated_omission(
-        &self,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<Self, RecordError> {
+    pub fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError> {
         let mut target = DoubleHistogramImpl::with_highest_to_lowest_value_ratio(
             self.configured_highest_to_lowest_value_ratio,
             self.get_number_of_significant_value_digits(),
@@ -273,6 +310,30 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         Ok(target)
     }
 
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Histogram<u64>> {
+        DoublePercentileIterator::new(&self.integer_histogram, percentile_ticks_per_half_distance)
+    }
+
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Histogram<u64>> {
+        DoubleLinearIterator::new(&self.integer_histogram, value_units_per_bucket)
+    }
+
+    pub fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: f64,
+        log_base: f64,
+    ) -> DoubleLogarithmicIterator<&'_ Histogram<u64>> {
+        DoubleLogarithmicIterator::new(&self.integer_histogram, value_units_in_first_bucket, log_base)
+    }
+
+    pub fn all_values(&self) -> DoubleAllValuesIterator<&'_ Histogram<u64>> {
+        DoubleAllValuesIterator::new(&self.integer_histogram)
+    }
+
+    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<&'_ Histogram<u64>> {
+        DoubleRecordedValuesIterator::new(&self.integer_histogram)
+    }
+
     fn init(&mut self, configured_highest_to_lowest_value_ratio: u64, lowest_trackable_unit_value: f64) {
         self.configured_highest_to_lowest_value_ratio = configured_highest_to_lowest_value_ratio;
         let internal_ratio = derive_internal_highest_to_lowest_value_ratio(configured_highest_to_lowest_value_ratio);
@@ -283,7 +344,10 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
     fn set_trackable_value_range(&mut self, lowest_value_in_auto_range: f64, highest_value_in_auto_range: f64) {
         self.current_lowest_value_in_auto_range = lowest_value_in_auto_range;
         self.current_highest_value_limit_in_auto_range = highest_value_in_auto_range;
-        let ratio = lowest_value_in_auto_range / self.integer_histogram.lowest_tracking_integer_value() as f64;
+        let ratio = self
+            .integer_histogram
+            .settings()
+            .integer_to_double_value_conversion_ratio_for_lowest(lowest_value_in_auto_range);
         self.integer_histogram.set_integer_to_double_value_conversion_ratio(ratio);
     }
 
@@ -304,6 +368,11 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
         Ok(scaled as u64)
+    }
+
+    #[inline(always)]
+    fn to_integer_value_unchecked(&self, value: f64) -> u64 {
+        (value * self.get_double_to_integer_value_conversion_ratio()) as u64
     }
 
     fn to_integer_value_clamped(&self, value: f64) -> u64 {
@@ -341,6 +410,58 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         Ok(())
     }
 
+    #[inline(always)]
+    fn record_single_value(&mut self, value: f64) -> Result<(), RecordError> {
+        if value >= self.current_lowest_value_in_auto_range && value < self.current_highest_value_limit_in_auto_range {
+            return self.record_single_value_in_current_range(value);
+        }
+        self.record_single_value_slow(value)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn record_single_value_slow(&mut self, value: f64) -> Result<(), RecordError> {
+        if !value.is_finite() {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
+        if value == 0.0 {
+            return self.integer_histogram.record_value_strict(0);
+        }
+        if value < 0.0 {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
+
+        if let Err(err) = self.auto_adjust_range_for_value(value) {
+            if P::SATURATE {
+                if value < self.current_lowest_value_in_auto_range {
+                    let clamped_value = self.current_lowest_value_in_auto_range;
+                    let integer_value = self.to_integer_value_clamped(clamped_value);
+                    return self.integer_histogram.record_value_with_count_saturating(integer_value, 1);
+                }
+                let integer_value = self.to_integer_value_clamped(value);
+                return self.integer_histogram.record_value_with_count_saturating(integer_value, 1);
+            }
+            return Err(err);
+        }
+
+        self.record_single_value_in_current_range(value)
+    }
+
+    #[inline(always)]
+    fn record_single_value_in_current_range(&mut self, value: f64) -> Result<(), RecordError> {
+        let integer_value = self.to_integer_value_unchecked(value);
+        match self.integer_histogram.record_value_strict(integer_value) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if P::SATURATE {
+                    self.integer_histogram.record_value_with_count_saturating(integer_value, 1)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
     fn record_count_at_value(&mut self, count: u64, value: f64) -> Result<(), RecordError> {
         if !value.is_finite() {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
@@ -357,25 +478,26 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
                 if P::SATURATE {
                     if value < self.current_lowest_value_in_auto_range {
                         let clamped_value = self.current_lowest_value_in_auto_range;
-                        let integer_value = self.to_integer_value(clamped_value)?;
-                        return self.integer_histogram.record_value_with_count(integer_value, count);
+                        let integer_value = self.to_integer_value_clamped(clamped_value);
+                        return self.integer_histogram.record_value_with_count_saturating(integer_value, count);
                     }
-                    let integer_value = self.to_integer_value(value)?;
-                    return self.integer_histogram.record_value_with_count(integer_value, count);
+                    let integer_value = self.to_integer_value_clamped(value);
+                    return self.integer_histogram.record_value_with_count_saturating(integer_value, count);
                 }
                 return Err(err);
             }
         }
 
-        let integer_value = self.to_integer_value(value)?;
-        match self
-            .integer_histogram
-            .record_value_with_count_strict(integer_value, count)
-        {
+        let integer_value = if P::SATURATE {
+            self.to_integer_value_clamped(value)
+        } else {
+            self.to_integer_value(value)?
+        };
+        match self.integer_histogram.record_value_with_count_strict(integer_value, count) {
             Ok(()) => Ok(()),
             Err(err) => {
                 if P::SATURATE {
-                    self.integer_histogram.record_value_with_count(integer_value, count)
+                    self.integer_histogram.record_value_with_count_saturating(integer_value, count)
                 } else {
                     Err(err)
                 }
@@ -383,6 +505,8 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         }
     }
 
+    #[cold]
+    #[inline(never)]
     fn auto_adjust_range_for_value(&mut self, value: f64) -> Result<(), RecordError> {
         if value == 0.0 {
             return Ok(());
@@ -427,20 +551,17 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         self.current_highest_value_limit_in_auto_range *= shift_multiplier;
 
         let result = (|| {
-            if self.integer_histogram.get_total_count()
-                > *self.integer_histogram.unsafe_get_count_at_index(0)
-            {
-                if self
+            if self.integer_histogram.get_total_count() > *self.integer_histogram.unsafe_get_count_at_index(0)
+                && self
                     .integer_histogram
                     .shift_values_left(number_of_binary_orders_of_magnitude)
                     .is_err()
-                {
-                    self.handle_shift_values_exception(number_of_binary_orders_of_magnitude)?;
-                    new_highest /= shift_multiplier;
-                    self.integer_histogram
-                        .shift_values_left(number_of_binary_orders_of_magnitude)
-                        .map_err(|_| RecordError::ValueOutOfRangeResizeDisabled)?;
-                }
+            {
+                self.handle_shift_values_exception(number_of_binary_orders_of_magnitude)?;
+                new_highest /= shift_multiplier;
+                self.integer_histogram
+                    .shift_values_left(number_of_binary_orders_of_magnitude)
+                    .map_err(|_| RecordError::ValueOutOfRangeResizeDisabled)?;
             }
             new_lowest *= shift_multiplier;
             new_highest *= shift_multiplier;
@@ -459,13 +580,8 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         self.current_lowest_value_in_auto_range *= shift_multiplier;
 
         let result = (|| {
-            if self.integer_histogram.get_total_count()
-                > *self.integer_histogram.unsafe_get_count_at_index(0)
-            {
-                match self
-                    .integer_histogram
-                    .shift_values_right(number_of_binary_orders_of_magnitude)
-                {
+            if self.integer_histogram.get_total_count() > *self.integer_histogram.unsafe_get_count_at_index(0) {
+                match self.integer_histogram.shift_values_right(number_of_binary_orders_of_magnitude) {
                     Ok(()) => {
                         new_lowest *= shift_multiplier;
                         new_highest *= shift_multiplier;
@@ -485,10 +601,7 @@ impl<P: OverflowPolicy> DoubleHistogramImpl<P> {
         result
     }
 
-    fn handle_shift_values_exception(
-        &mut self,
-        number_of_binary_orders_of_magnitude: u32,
-    ) -> Result<(), RecordError> {
+    fn handle_shift_values_exception(&mut self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
         if !self.auto_resize {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }

@@ -29,9 +29,7 @@ impl IterationState {
             total_count_to_prev_index: 0,
             total_count_to_current_index: 0,
             total_value_to_current_index: 0,
-            integer_to_double_value_conversion_ratio: histogram
-                .settings()
-                .integer_to_double_value_conversion_ratio,
+            integer_to_double_value_conversion_ratio: histogram.integer_to_double_value_conversion_ratio(),
         }
     }
 
@@ -46,8 +44,6 @@ impl IterationState {
         self.total_count_to_prev_index = 0;
         self.total_count_to_current_index = 0;
         self.total_value_to_current_index = 0;
-        self.integer_to_double_value_conversion_ratio = histogram
-            .settings()
-            .integer_to_double_value_conversion_ratio;
+        self.integer_to_double_value_conversion_ratio = histogram.integer_to_double_value_conversion_ratio();
     }
 }

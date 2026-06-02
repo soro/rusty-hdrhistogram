@@ -1,6 +1,6 @@
-use crate::concurrent::ConcurrentDoubleHistogram;
+use crate::concurrent::{ConcurrentDoubleHistogram, SaturatingConcurrentDoubleHistogram};
 use crate::core::{DoubleCreationError, RecordError};
-use crate::st::DoubleHistogram;
+use crate::st::{DoubleHistogram, SaturatingDoubleHistogram};
 
 const TRACKABLE_VALUE_RANGE_SIZE: u64 = 3600 * 1000 * 1000;
 const NUMBER_OF_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
@@ -14,11 +14,7 @@ trait TestDoubleHistogram: Sized {
     ) -> Result<Self, DoubleCreationError>;
     fn record_value(&mut self, value: f64) -> Result<(), RecordError>;
     fn record_value_with_count(&mut self, value: f64, count: u64) -> Result<(), RecordError>;
-    fn record_value_with_expected_interval(
-        &mut self,
-        value: f64,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<(), RecordError>;
+    fn record_value_with_expected_interval(&mut self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError>;
     fn get_count_at_value(&self, value: f64) -> u64;
     fn get_total_count(&self) -> u64;
     fn get_min_value(&self) -> f64;
@@ -40,10 +36,7 @@ trait TestDoubleHistogram: Sized {
     fn set_auto_resize(&mut self, auto_resize: bool);
     fn reset(&mut self);
     fn add(&mut self, other: &Self) -> Result<(), RecordError>;
-    fn copy_corrected_for_coordinated_omission(
-        &self,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<Self, RecordError>;
+    fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError>;
 }
 
 impl TestDoubleHistogram for DoubleHistogram {
@@ -54,10 +47,7 @@ impl TestDoubleHistogram for DoubleHistogram {
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {
-        DoubleHistogram::with_highest_to_lowest_value_ratio(
-            highest_to_lowest_value_ratio,
-            number_of_significant_value_digits,
-        )
+        DoubleHistogram::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
     }
     fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
         DoubleHistogram::record_value(self, value)
@@ -65,11 +55,7 @@ impl TestDoubleHistogram for DoubleHistogram {
     fn record_value_with_count(&mut self, value: f64, count: u64) -> Result<(), RecordError> {
         DoubleHistogram::record_value_with_count(self, value, count)
     }
-    fn record_value_with_expected_interval(
-        &mut self,
-        value: f64,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<(), RecordError> {
+    fn record_value_with_expected_interval(&mut self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
         DoubleHistogram::record_value_with_expected_interval(self, value, expected_interval_between_value_samples)
     }
     fn get_count_at_value(&self, value: f64) -> u64 {
@@ -135,10 +121,7 @@ impl TestDoubleHistogram for DoubleHistogram {
     fn add(&mut self, other: &Self) -> Result<(), RecordError> {
         DoubleHistogram::add(self, other)
     }
-    fn copy_corrected_for_coordinated_omission(
-        &self,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<Self, RecordError> {
+    fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError> {
         DoubleHistogram::copy_corrected_for_coordinated_omission(self, expected_interval_between_value_samples)
     }
 }
@@ -151,10 +134,7 @@ impl TestDoubleHistogram for ConcurrentDoubleHistogram {
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {
-        ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-            highest_to_lowest_value_ratio,
-            number_of_significant_value_digits,
-        )
+        ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
     }
     fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
         ConcurrentDoubleHistogram::record_value(self, value)
@@ -162,16 +142,8 @@ impl TestDoubleHistogram for ConcurrentDoubleHistogram {
     fn record_value_with_count(&mut self, value: f64, count: u64) -> Result<(), RecordError> {
         ConcurrentDoubleHistogram::record_value_with_count(self, value, count)
     }
-    fn record_value_with_expected_interval(
-        &mut self,
-        value: f64,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<(), RecordError> {
-        ConcurrentDoubleHistogram::record_value_with_expected_interval(
-            self,
-            value,
-            expected_interval_between_value_samples,
-        )
+    fn record_value_with_expected_interval(&mut self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
+        ConcurrentDoubleHistogram::record_value_with_expected_interval(self, value, expected_interval_between_value_samples)
     }
     fn get_count_at_value(&self, value: f64) -> u64 {
         ConcurrentDoubleHistogram::get_count_at_value(self, value)
@@ -236,14 +208,8 @@ impl TestDoubleHistogram for ConcurrentDoubleHistogram {
     fn add(&mut self, other: &Self) -> Result<(), RecordError> {
         ConcurrentDoubleHistogram::add(self, other)
     }
-    fn copy_corrected_for_coordinated_omission(
-        &self,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<Self, RecordError> {
-        ConcurrentDoubleHistogram::copy_corrected_for_coordinated_omission(
-            self,
-            expected_interval_between_value_samples,
-        )
+    fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError> {
+        ConcurrentDoubleHistogram::copy_corrected_for_coordinated_omission(self, expected_interval_between_value_samples)
     }
 }
 
@@ -273,16 +239,17 @@ fn number_of_significant_value_digits_must_be_less_than_six() {
 }
 
 fn run_construction_argument_gets_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(f64::powi(2.0, 20)));
     succ!(histogram.record_value(1.0));
     assert_approx_eq!(1.0, histogram.get_current_lowest_trackable_non_zero_value(), 0.001);
     assert_eq!(TRACKABLE_VALUE_RANGE_SIZE, histogram.get_highest_to_lowest_value_ratio());
-    assert_eq!(NUMBER_OF_SIGNIFICANT_VALUE_DIGITS, histogram.get_number_of_significant_value_digits());
+    assert_eq!(
+        NUMBER_OF_SIGNIFICANT_VALUE_DIGITS,
+        histogram.get_number_of_significant_value_digits()
+    );
 
-    let mut histogram2 =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram2 = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram2.record_value(2048.0 * 1024.0 * 1024.0));
     assert_approx_eq!(
         2048.0 * 1024.0 * 1024.0,
@@ -290,14 +257,9 @@ fn run_construction_argument_gets_test<H: TestDoubleHistogram>() {
         0.001
     );
 
-    let mut histogram3 =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram3 = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram3.record_value(1.0 / 1000.0));
-    assert_approx_eq!(
-        1.0 / 1024.0,
-        histogram3.get_current_lowest_trackable_non_zero_value(),
-        0.001
-    );
+    assert_approx_eq!(1.0 / 1024.0, histogram3.get_current_lowest_trackable_non_zero_value(), 0.001);
 }
 
 #[test]
@@ -307,8 +269,7 @@ fn construction_argument_gets() {
 }
 
 fn run_data_range_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(0.0));
     assert_eq!(1, histogram.get_count_at_value(0.0));
 
@@ -323,8 +284,7 @@ fn run_data_range_test<H: TestDoubleHistogram>() {
     assert_approx_eq!((1_u64 << 33) as f64, top_value, 0.00001);
     assert_eq!(1, histogram.get_count_at_value(0.0));
 
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(0.0));
 
     let mut bottom_value = (1_u64 << 33) as f64;
@@ -349,8 +309,7 @@ fn data_range() {
 }
 
 fn run_record_value_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(TEST_VALUE_LEVEL));
     assert_eq!(1, histogram.get_count_at_value(TEST_VALUE_LEVEL));
     assert_eq!(1, histogram.get_total_count());
@@ -363,8 +322,7 @@ fn record_value() {
 }
 
 fn run_record_value_overflow_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(TRACKABLE_VALUE_RANGE_SIZE as f64 * 3.0));
     assert!(histogram.record_value(1.0).is_err());
 }
@@ -375,14 +333,31 @@ fn record_value_overflow_should_throw() {
     run_record_value_overflow_test::<ConcurrentDoubleHistogram>();
 }
 
+#[test]
+fn saturating_double_clamps_slot_selection() {
+    let mut st_histogram =
+        SaturatingDoubleHistogram::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS)
+            .unwrap();
+    succ!(st_histogram.record_value(f64::MAX));
+    assert_eq!(1, st_histogram.get_total_count());
+    assert!(st_histogram.get_max_value() < f64::MAX);
+
+    let concurrent_histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
+        TRACKABLE_VALUE_RANGE_SIZE,
+        NUMBER_OF_SIGNIFICANT_VALUE_DIGITS,
+    )
+    .unwrap();
+    succ!(concurrent_histogram.record_value(f64::MAX));
+    assert_eq!(1, concurrent_histogram.get_total_count());
+    assert!(concurrent_histogram.get_max_value() < f64::MAX);
+}
+
 fn run_record_value_with_expected_interval_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(0.0));
     succ!(histogram.record_value_with_expected_interval(TEST_VALUE_LEVEL, TEST_VALUE_LEVEL / 4.0));
 
-    let mut raw_histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut raw_histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(raw_histogram.record_value(0.0));
     succ!(raw_histogram.record_value(TEST_VALUE_LEVEL));
 
@@ -408,8 +383,7 @@ fn record_value_with_expected_interval() {
 }
 
 fn run_reset_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(TEST_VALUE_LEVEL));
     succ!(histogram.record_value(10.0));
     succ!(histogram.record_value(100.0));
@@ -431,10 +405,8 @@ fn reset() {
 }
 
 fn run_add_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
-    let mut other =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut other = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
 
     succ!(histogram.record_value(TEST_VALUE_LEVEL));
     succ!(histogram.record_value(TEST_VALUE_LEVEL * 1000.0));
@@ -446,8 +418,7 @@ fn run_add_test<H: TestDoubleHistogram>() {
     assert_eq!(4, histogram.get_total_count());
 
     let mut bigger_other =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE * 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS)
-            .unwrap();
+        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE * 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(bigger_other.record_value(TEST_VALUE_LEVEL));
     succ!(bigger_other.record_value(TEST_VALUE_LEVEL * 1000.0));
 
@@ -509,8 +480,7 @@ fn add_with_auto_resize() {
 }
 
 fn run_equivalent_value_range_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(1.0));
     assert_approx_eq!(1.0 / 1024.0, histogram.size_of_equivalent_value_range(1.0), 0.001);
     assert_approx_eq!(2.0, histogram.size_of_equivalent_value_range(2500.0), 0.001);
@@ -526,8 +496,7 @@ fn size_of_equivalent_value_range() {
 }
 
 fn run_lowest_equivalent_value_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(1.0));
     assert_approx_eq!(10000.0, histogram.lowest_equivalent_value(10007.0), 0.001);
     assert_approx_eq!(10008.0, histogram.lowest_equivalent_value(10009.0), 0.001);
@@ -540,8 +509,7 @@ fn lowest_equivalent_value() {
 }
 
 fn run_highest_equivalent_value_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(1.0));
     assert_approx_eq!(8183.99999, histogram.highest_equivalent_value(8180.0), 0.001);
     assert_approx_eq!(8191.99999, histogram.highest_equivalent_value(8191.0), 0.001);
@@ -558,8 +526,7 @@ fn highest_equivalent_value() {
 }
 
 fn run_median_equivalent_value_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(1.0));
     assert_approx_eq!(4.002, histogram.median_equivalent_value(4.0), 0.001);
     assert_approx_eq!(5.002, histogram.median_equivalent_value(5.0), 0.001);
@@ -597,16 +564,12 @@ struct DataHistograms<H: TestDoubleHistogram> {
 }
 
 fn build_data_histograms<H: TestDoubleHistogram>() -> DataHistograms<H> {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     let mut scaled_histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE / 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS)
-            .unwrap();
-    let mut raw_histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE / 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut raw_histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     let mut scaled_raw_histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE / 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS)
-            .unwrap();
+        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE / 2, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
 
     for _ in 0..10000 {
         succ!(histogram.record_value_with_expected_interval(1000.0, 10000.0));
@@ -619,10 +582,10 @@ fn build_data_histograms<H: TestDoubleHistogram>() -> DataHistograms<H> {
     succ!(raw_histogram.record_value(100000000.0));
     succ!(scaled_raw_histogram.record_value(100000000.0 * 512.0));
 
-    let post_corrected_histogram =
-        raw_histogram.copy_corrected_for_coordinated_omission(10000.0).unwrap();
-    let post_corrected_scaled_histogram =
-        scaled_raw_histogram.copy_corrected_for_coordinated_omission(10000.0 * 512.0).unwrap();
+    let post_corrected_histogram = raw_histogram.copy_corrected_for_coordinated_omission(10000.0).unwrap();
+    let post_corrected_scaled_histogram = scaled_raw_histogram
+        .copy_corrected_for_coordinated_omission(10000.0 * 512.0)
+        .unwrap();
 
     DataHistograms {
         histogram,
@@ -637,28 +600,50 @@ fn build_data_histograms<H: TestDoubleHistogram>() -> DataHistograms<H> {
 fn run_scaling_equivalence_test<H: TestDoubleHistogram>() {
     let data = build_data_histograms::<H>();
 
-    assert_approx_eq!(data.histogram.get_mean() * 512.0, data.scaled_histogram.get_mean(), data.scaled_histogram.get_mean() * 0.000001);
+    assert_approx_eq!(
+        data.histogram.get_mean() * 512.0,
+        data.scaled_histogram.get_mean(),
+        data.scaled_histogram.get_mean() * 0.000001
+    );
     assert_eq!(data.histogram.get_total_count(), data.scaled_histogram.get_total_count());
     assert_approx_eq!(
-        data.scaled_histogram.highest_equivalent_value(data.histogram.get_value_at_percentile(99.0) * 512.0),
-        data.scaled_histogram.highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0)),
-        data.scaled_histogram.highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0)) * 0.000001
+        data.scaled_histogram
+            .highest_equivalent_value(data.histogram.get_value_at_percentile(99.0) * 512.0),
+        data.scaled_histogram
+            .highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0)),
+        data.scaled_histogram
+            .highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0))
+            * 0.000001
     );
     assert_approx_eq!(
-        data.scaled_histogram.highest_equivalent_value(data.histogram.get_max_value() * 512.0),
+        data.scaled_histogram
+            .highest_equivalent_value(data.histogram.get_max_value() * 512.0),
         data.scaled_histogram.get_max_value(),
         data.scaled_histogram.get_max_value() * 0.000001
     );
 
-    assert_approx_eq!(data.histogram.get_mean() * 512.0, data.scaled_histogram.get_mean(), data.scaled_histogram.get_mean() * 0.000001);
-    assert_eq!(data.post_corrected_histogram.get_total_count(), data.post_corrected_scaled_histogram.get_total_count());
     assert_approx_eq!(
-        data.post_corrected_histogram.lowest_equivalent_value(data.post_corrected_histogram.get_value_at_percentile(99.0)) * 512.0,
-        data.post_corrected_scaled_histogram.lowest_equivalent_value(data.post_corrected_scaled_histogram.get_value_at_percentile(99.0)),
-        data.post_corrected_scaled_histogram.lowest_equivalent_value(data.post_corrected_scaled_histogram.get_value_at_percentile(99.0)) * 0.000001
+        data.histogram.get_mean() * 512.0,
+        data.scaled_histogram.get_mean(),
+        data.scaled_histogram.get_mean() * 0.000001
+    );
+    assert_eq!(
+        data.post_corrected_histogram.get_total_count(),
+        data.post_corrected_scaled_histogram.get_total_count()
     );
     assert_approx_eq!(
-        data.post_corrected_scaled_histogram.highest_equivalent_value(data.post_corrected_histogram.get_max_value() * 512.0),
+        data.post_corrected_histogram
+            .lowest_equivalent_value(data.post_corrected_histogram.get_value_at_percentile(99.0))
+            * 512.0,
+        data.post_corrected_scaled_histogram
+            .lowest_equivalent_value(data.post_corrected_scaled_histogram.get_value_at_percentile(99.0)),
+        data.post_corrected_scaled_histogram
+            .lowest_equivalent_value(data.post_corrected_scaled_histogram.get_value_at_percentile(99.0))
+            * 0.000001
+    );
+    assert_approx_eq!(
+        data.post_corrected_scaled_histogram
+            .highest_equivalent_value(data.post_corrected_histogram.get_max_value() * 512.0),
         data.post_corrected_scaled_histogram.get_max_value(),
         data.post_corrected_scaled_histogram.get_max_value() * 0.000001
     );
@@ -684,7 +669,9 @@ fn get_total_count() {
 
 fn run_get_max_value_test<H: TestDoubleHistogram>() {
     let data = build_data_histograms::<H>();
-    assert!(data.histogram.values_are_equivalent(100.0 * 1000.0 * 1000.0, data.histogram.get_max_value()));
+    assert!(data
+        .histogram
+        .values_are_equivalent(100.0 * 1000.0 * 1000.0, data.histogram.get_max_value()));
 }
 
 #[test]
@@ -721,10 +708,8 @@ fn get_mean() {
 fn run_get_std_deviation_test<H: TestDoubleHistogram>() {
     let data = build_data_histograms::<H>();
     let expected_raw_mean: f64 = ((10000.0 * 1000.0) + (1.0 * 100000000.0)) / 10001.0;
-    let expected_raw_stddev: f64 = (((10000.0 * (1000.0 - expected_raw_mean).powi(2))
-        + (100000000.0 - expected_raw_mean).powi(2))
-        / 10001.0)
-        .sqrt();
+    let expected_raw_stddev: f64 =
+        (((10000.0 * (1000.0 - expected_raw_mean).powi(2)) + (100000000.0 - expected_raw_mean).powi(2)) / 10001.0).sqrt();
 
     let expected_mean: f64 = (1000.0 + 50000000.0) / 2.0;
     let mut expected_square_deviation_sum: f64 = 10000.0 * (1000.0 - expected_mean).powi(2);
@@ -735,7 +720,11 @@ fn run_get_std_deviation_test<H: TestDoubleHistogram>() {
     }
     let expected_stddev: f64 = (expected_square_deviation_sum / 20000.0).sqrt();
 
-    assert_approx_eq!(expected_raw_stddev, data.raw_histogram.get_std_deviation(), expected_raw_stddev * 0.001);
+    assert_approx_eq!(
+        expected_raw_stddev,
+        data.raw_histogram.get_std_deviation(),
+        expected_raw_stddev * 0.001
+    );
     assert_approx_eq!(expected_stddev, data.histogram.get_std_deviation(), expected_stddev * 0.001);
 }
 
@@ -769,8 +758,7 @@ fn get_value_at_percentile() {
 }
 
 fn run_get_value_at_percentile_examples_test<H: TestDoubleHistogram>() {
-    let mut histogram =
-        H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
+    let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(1.0));
     succ!(histogram.record_value(2.0));
     let value = histogram.get_value_at_percentile(50.0);
@@ -831,4 +819,66 @@ fn run_auto_sizing_edges_test<H: TestDoubleHistogram>() {
 fn auto_sizing_edges() {
     run_auto_sizing_edges_test::<DoubleHistogram>();
     run_auto_sizing_edges_test::<ConcurrentDoubleHistogram>();
+}
+
+macro_rules! assert_double_iterator_surface {
+    (@check $histogram:ident) => {{
+        succ!($histogram.record_value_with_count(1.5, 2));
+        succ!($histogram.record_value(10.0));
+
+        let recorded: Vec<_> = $histogram.recorded_values().collect();
+        assert_eq!(
+            3,
+            recorded.iter().map(|value| value.count_added_in_this_iteration_step).sum::<u64>()
+        );
+        assert!(recorded.iter().any(|value| {
+            $histogram.values_are_equivalent(1.5, value.value_iterated_to) && value.count_added_in_this_iteration_step == 2
+        }));
+        assert!(recorded.iter().any(|value| {
+            $histogram.values_are_equivalent(10.0, value.value_iterated_to) && value.count_added_in_this_iteration_step == 1
+        }));
+        for value in recorded {
+            let integer_value = value.integer_iteration_value;
+            assert_eq!(
+                integer_value.value_iterated_to as f64 * integer_value.integer_to_double_value_conversion_ratio,
+                value.value_iterated_to
+            );
+            assert_eq!(
+                integer_value.total_value_to_this_value as f64 * integer_value.integer_to_double_value_conversion_ratio,
+                value.total_value_to_this_value
+            );
+        }
+
+        let linear_total = $histogram
+            .linear_bucket_values(1.0)
+            .map(|value| value.count_added_in_this_iteration_step)
+            .sum::<u64>();
+        assert_eq!(3, linear_total);
+
+        let logarithmic_total = $histogram
+            .logarithmic_bucket_values(1.0, 2.0)
+            .map(|value| value.count_added_in_this_iteration_step)
+            .sum::<u64>();
+        assert_eq!(3, logarithmic_total);
+
+        let percentile_last = $histogram.percentiles(5).last().unwrap();
+        assert_eq!(3, percentile_last.total_count_to_this_value);
+        assert!($histogram.values_are_equivalent(10.0, percentile_last.value_iterated_to));
+
+        let first_all_value = $histogram.all_values().next().unwrap();
+        assert_eq!(0.0, first_all_value.value_iterated_to);
+    }};
+    ($histogram:ty, mut) => {{
+        let mut histogram = <$histogram>::new(3).unwrap();
+        assert_double_iterator_surface!(@check histogram);
+    }};
+    ($histogram:ty) => {{
+        let histogram = <$histogram>::new(3).unwrap();
+        assert_double_iterator_surface!(@check histogram);
+    }};
+}
+
+#[test]
+fn double_iterator_surface_exposes_double_values() {
+    assert_double_iterator_surface!(DoubleHistogram, mut);
 }

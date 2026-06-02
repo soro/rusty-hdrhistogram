@@ -6,6 +6,12 @@ pub struct HistogramMetaData {
     pub tag: Option<String>,
 }
 
+impl Default for HistogramMetaData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HistogramMetaData {
     pub fn new() -> HistogramMetaData {
         HistogramMetaData {

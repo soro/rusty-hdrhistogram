@@ -1,25 +1,37 @@
+use crate::core::HistogramStorageMetadata;
+
 pub struct BackingArray<T> {
     data: Vec<T>,
+    metadata: HistogramStorageMetadata,
 }
 
 impl<T: Default + Copy> BackingArray<T> {
     #[inline]
-    pub fn new(length: u32) -> BackingArray<T> {
+    pub fn new(metadata: HistogramStorageMetadata) -> BackingArray<T> {
         BackingArray {
-            data: vec![T::default(); length as usize],
+            data: vec![T::default(); metadata.counts_array_length as usize],
+            metadata,
         }
     }
 
     pub fn empty() -> BackingArray<T> {
-        BackingArray { data: Vec::new() }
+        BackingArray {
+            data: Vec::new(),
+            metadata: HistogramStorageMetadata {
+                bucket_count: 0,
+                counts_array_length: 0,
+                highest_trackable_value: 0,
+            },
+        }
     }
 
     #[inline]
-    pub fn grow(&mut self, new_length: u32) {
-        let new_length = new_length as usize;
+    pub fn grow(&mut self, metadata: HistogramStorageMetadata) {
+        let new_length = metadata.counts_array_length as usize;
         if new_length > self.data.len() {
             self.data.resize(new_length, T::default());
         }
+        self.metadata = metadata;
     }
 
     #[inline(always)]
@@ -44,7 +56,12 @@ impl<T: Default + Copy> BackingArray<T> {
 
     #[inline(always)]
     pub fn length(&self) -> u32 {
-        self.data.len() as u32
+        self.metadata.counts_array_length
+    }
+
+    #[inline(always)]
+    pub fn metadata(&self) -> HistogramStorageMetadata {
+        self.metadata
     }
 
     #[inline(always)]
@@ -54,7 +71,7 @@ impl<T: Default + Copy> BackingArray<T> {
         }
     }
 
-    pub fn get_slice<'a>(&'a self, length: u32) -> Option<&'a [T]> {
+    pub fn get_slice(&self, length: u32) -> Option<&[T]> {
         let length = length as usize;
         if length <= self.data.len() {
             return Some(&self.data[..length]);
@@ -62,7 +79,7 @@ impl<T: Default + Copy> BackingArray<T> {
         None
     }
 
-    pub fn get_slice_mut<'a>(&'a mut self, length: u32) -> Option<&'a mut [T]> {
+    pub fn get_slice_mut(&mut self, length: u32) -> Option<&mut [T]> {
         let length = length as usize;
         if length <= self.data.len() {
             return Some(&mut self.data[..length]);

@@ -5,3 +5,5 @@ Cargo.lock
 .idea
 .criterion
 .vscode
+
+benchmark-results/

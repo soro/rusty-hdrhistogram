@@ -1,5 +1,5 @@
-use crate::core::HistogramSettings;
 use crate::core::errors::*;
+use crate::core::HistogramSettings;
 
 #[test]
 fn unit_magnitude_0_index_calculations() {
@@ -22,10 +22,7 @@ fn unit_magnitude_0_index_calculations() {
     assert_eq!(1024 + 3, s.get_sub_bucket_index((2048 << 1) + 3 * 4, 2));
 
     assert_eq!(23, s.get_bucket_index((2048_u64 << 22) + 3 * (1 << 23)));
-    assert_eq!(
-        1024 + 3,
-        s.get_sub_bucket_index((2048_u64 << 22) + 3 * (1 << 23), 23)
-    );
+    assert_eq!(1024 + 3, s.get_sub_bucket_index((2048_u64 << 22) + 3 * (1 << 23), 23));
 }
 
 #[test]
@@ -47,22 +44,13 @@ fn unit_magnitude_4_index_calculations() {
     assert_eq!(1024 + 3, s.get_sub_bucket_index(unit * (1024 + 3), 0));
 
     assert_eq!(1, s.get_bucket_index((unit << 11) + 3 * (unit << 1)));
-    assert_eq!(
-        1024 + 3,
-        s.get_sub_bucket_index((unit << 11) + 3 * (unit << 1), 1)
-    );
+    assert_eq!(1024 + 3, s.get_sub_bucket_index((unit << 11) + 3 * (unit << 1), 1));
 
     assert_eq!(2, s.get_bucket_index((unit << 12) + 3 * (unit << 2)));
-    assert_eq!(
-        1024 + 3,
-        s.get_sub_bucket_index((unit << 12) + 3 * (unit << 2), 2)
-    );
+    assert_eq!(1024 + 3, s.get_sub_bucket_index((unit << 12) + 3 * (unit << 2), 2));
 
     assert_eq!(11, s.get_bucket_index((unit << 21) + 3 * (unit << 11)));
-    assert_eq!(
-        1024 + 3,
-        s.get_sub_bucket_index((unit << 21) + 3 * (unit << 11), 11)
-    );
+    assert_eq!(1024 + 3, s.get_sub_bucket_index((unit << 21) + 3 * (unit << 11), 11));
 }
 
 #[test]
@@ -86,16 +74,10 @@ fn unit_magnitude_52_sub_bucket_magnitude_11_index_calculations() {
     assert_eq!(1024 + 3, s.get_sub_bucket_index(unit * (1024 + 3), 0));
 
     assert_eq!(0, s.get_bucket_index(unit * 1024 + 1023 * unit));
-    assert_eq!(
-        1024 + 1023,
-        s.get_sub_bucket_index(unit * 1024 + 1023 * unit, 0)
-    );
+    assert_eq!(1024 + 1023, s.get_sub_bucket_index(unit * 1024 + 1023 * unit, 0));
 
     assert_eq!(1, s.get_bucket_index((unit << 11) + 3 * (unit << 1)));
-    assert_eq!(
-        1024 + 3,
-        s.get_sub_bucket_index((unit << 11) + 3 * (unit << 1), 1)
-    );
+    assert_eq!(1024 + 3, s.get_sub_bucket_index((unit << 11) + 3 * (unit << 1), 1));
 
     assert_eq!(1, s.get_bucket_index(u64::MAX));
     assert_eq!(1024 + 1023, s.get_sub_bucket_index(u64::MAX, 1));

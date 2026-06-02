@@ -1,5 +1,5 @@
 use crate::core::ReadableHistogram;
-use crate::iteration::*;
+use crate::iteration::iteration_state::IterationState;
 
 pub trait IterationStrategy<T: ReadableHistogram>: Sized {
     fn reached_iteration_level(&mut self, state: &IterationState, histogram: &T) -> bool;
@@ -11,9 +11,7 @@ pub trait IterationStrategy<T: ReadableHistogram>: Sized {
     }
 
     fn get_value_iterated_to(&mut self, state: &IterationState, histogram: &T) -> u64 {
-        histogram
-            .settings()
-            .highest_equivalent_value(state.current_value_at_index)
+        histogram.settings().highest_equivalent_value(state.current_value_at_index)
     }
     fn get_percentile_iterated_to(&mut self, state: &IterationState) -> f64 {
         100.0 * (state.total_count_to_current_index as f64 / state.array_total_count as f64)
@@ -102,9 +100,7 @@ impl<T: ReadableHistogram> IterationStrategy<T> for LogarithmicStrategy {
     }
     fn has_next(&mut self, state: &IterationState, histogram: &T) -> bool {
         default_has_next(state)
-            || histogram
-                .settings()
-                .lowest_equivalent_value(self.next_value_reporting_level as u64) < state.next_value_at_index
+            || histogram.settings().lowest_equivalent_value(self.next_value_reporting_level as u64) < state.next_value_at_index
     }
     fn get_value_iterated_to(&mut self, _: &IterationState, _: &T) -> u64 {
         self.current_step_highest_value_reporting_level
@@ -129,8 +125,7 @@ impl<T: ReadableHistogram> IterationStrategy<T> for PercentileStrategy {
 
     fn increment_iteration_level(&mut self, _: &IterationState, _: &T) {
         self.percentile_level_to_iterate_from = self.percentile_level_to_iterate_to;
-        let exp = (f64::ln(100.0 / (100.0 - self.percentile_level_to_iterate_to)) / f64::ln(2.0))
-            as i64;
+        let exp = (f64::ln(100.0 / (100.0 - self.percentile_level_to_iterate_to)) / f64::ln(2.0)) as i64;
         let exp = exp.saturating_add(1);
         let exp = if exp < 0 {
             0_u32

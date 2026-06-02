@@ -12,13 +12,52 @@ edition = "2021"
 
 [dependencies]
 parking_lot = "0.12"
-zlib-rs = { version = "0.4", optional = true }
+crossbeam-epoch = "0.9"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], optional = true }
 base64 = { version = "0.22", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+clap = { version = "4.6.1", features = ["derive"], optional = true }
 
 [features]
-encoding-compression = ["zlib-rs"]
-encoding-base64 = ["base64", "encoding-compression"]
+encoding-compression = ["dep:flate2"]
+encoding-base64 = ["dep:base64", "dep:chrono", "encoding-compression"]
+cli = ["dep:clap", "encoding-base64"]
+loom-tests = []
 
 [dev-dependencies]
+criterion = "0.8.2"
+loom = "0.7"
 rand = "0.8"
-#criterion = { git = "https://github.com/japaric/criterion.rs.git" }
+
+[[bench]]
+name = "record"
+harness = false
+
+[[bench]]
+name = "encoding"
+harness = false
+
+[[bin]]
+name = "hdrhistogram"
+path = "src/bin/hdrhistogram.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "loom_phaser"
+path = "tests/loom_phaser.rs"
+required-features = ["loom-tests"]
+
+[[test]]
+name = "loom_recorder"
+path = "tests/loom_recorder.rs"
+required-features = ["loom-tests"]
+
+[[test]]
+name = "loom_resizable_read_view"
+path = "tests/loom_resizable_read_view.rs"
+required-features = ["loom-tests"]
+
+[[test]]
+name = "loom_concurrent_double_gate"
+path = "tests/loom_concurrent_double_gate.rs"
+required-features = ["loom-tests"]

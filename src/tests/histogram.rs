@@ -38,12 +38,13 @@ fn test_record_value() {
 }
 
 #[test]
-fn record_value_overflow_saturates() {
+fn record_value_overflow_throws() {
     let highest = 3600_u64 * 1000 * 1000;
     let mut histogram = Histogram::<u64>::with_high_sigvdig(highest, SIG_V_DIGITS).unwrap();
-    succ!(histogram.record_value(highest * 3));
-    let last_idx = histogram.last_index();
-    assert_eq!(Some(1), histogram.get_count_at_index(last_idx).copied());
+    assert!(matches!(
+        histogram.record_value(highest * 3),
+        Err(RecordError::ValueOutOfRangeResizeDisabled)
+    ));
 }
 
 #[test]
@@ -54,41 +55,18 @@ fn record_value_with_expected_interval() {
     succ!(raw_histogram.record_value(TEST_VALUE_LEVEL));
 
     // should contain extra compensation entries
-    assert_eq!(
-        Some(1),
-        histogram.get_count_at_value((TEST_VALUE_LEVEL * 1) / 4)
-    );
-    assert_eq!(
-        Some(1),
-        histogram.get_count_at_value((TEST_VALUE_LEVEL * 2) / 4)
-    );
-    assert_eq!(
-        Some(1),
-        histogram.get_count_at_value((TEST_VALUE_LEVEL * 3) / 4)
-    );
-    assert_eq!(
-        Some(1),
-        histogram.get_count_at_value((TEST_VALUE_LEVEL * 4) / 4)
-    );
+    let compensation_interval = TEST_VALUE_LEVEL / 4;
+    assert_eq!(Some(1), histogram.get_count_at_value(compensation_interval));
+    assert_eq!(Some(1), histogram.get_count_at_value(compensation_interval * 2));
+    assert_eq!(Some(1), histogram.get_count_at_value(compensation_interval * 3));
+    assert_eq!(Some(1), histogram.get_count_at_value(TEST_VALUE_LEVEL));
     assert_eq!(4, histogram.get_total_count());
 
     // should not
-    assert_eq!(
-        Some(0),
-        raw_histogram.get_count_at_value((TEST_VALUE_LEVEL * 1) / 4)
-    );
-    assert_eq!(
-        Some(0),
-        raw_histogram.get_count_at_value((TEST_VALUE_LEVEL * 2) / 4)
-    );
-    assert_eq!(
-        Some(0),
-        raw_histogram.get_count_at_value((TEST_VALUE_LEVEL * 3) / 4)
-    );
-    assert_eq!(
-        Some(1),
-        raw_histogram.get_count_at_value((TEST_VALUE_LEVEL * 4) / 4)
-    );
+    assert_eq!(Some(0), raw_histogram.get_count_at_value(compensation_interval));
+    assert_eq!(Some(0), raw_histogram.get_count_at_value(compensation_interval * 2));
+    assert_eq!(Some(0), raw_histogram.get_count_at_value(compensation_interval * 3));
+    assert_eq!(Some(1), raw_histogram.get_count_at_value(TEST_VALUE_LEVEL));
     assert_eq!(1, raw_histogram.get_total_count());
 
     verify_max_value(histogram);
@@ -107,6 +85,14 @@ fn construction_with_large_numbers() {
     assert!(histogram.values_are_equivalent(100000000, histogram.get_value_at_percentile(83.33)));
     assert!(histogram.values_are_equivalent(100000000, histogram.get_value_at_percentile(83.34)));
     assert!(histogram.values_are_equivalent(100000000, histogram.get_value_at_percentile(99.0)));
+}
+
+#[test]
+fn settings_and_corrected_lowest_discernible_name_are_public() {
+    let histogram = Histogram::<u64>::with_low_high_sigvdig(1, 1024, 2).unwrap();
+
+    assert_eq!(1, histogram.get_lowest_discernible_value());
+    assert_eq!(1024, histogram.settings().highest_trackable_value);
 }
 
 #[test]
@@ -159,8 +145,8 @@ fn size_of_equivalent_value_range() {
 fn scaled_size_of_equivalent_value_range() {
     let histogram = Histogram::<u64>::with_low_high_sigvdig(1024, HIGHEST_TRACKABLE, SIG_V_DIGITS).unwrap();
     assert_eq!(
-        1 * 1024,
-        histogram.size_of_equivalent_value_range(1 * 1024),
+        1024,
+        histogram.size_of_equivalent_value_range(1024),
         "Size of equivalent range for value 1 * 1024 is 1 * 1024"
     );
     assert_eq!(
@@ -201,7 +187,6 @@ fn lowest_equivalent_value() {
     );
     verify_max_value(histogram);
 }
-
 
 #[test]
 fn scaled_lowest_equivalent_value() {
@@ -322,16 +307,8 @@ fn scaled_highest_equivalent_value() {
 #[test]
 fn median_equivalent_value() {
     let histogram = Histogram::<u64>::with_high_sigvdig(HIGHEST_TRACKABLE, SIG_V_DIGITS).unwrap();
-    assert_eq!(
-        4,
-        histogram.median_equivalent_value(4),
-        "The median equivalent value to 4 is 4"
-    );
-    assert_eq!(
-        5,
-        histogram.median_equivalent_value(5),
-        "The median equivalent value to 5 is 5"
-    );
+    assert_eq!(4, histogram.median_equivalent_value(4), "The median equivalent value to 4 is 4");
+    assert_eq!(5, histogram.median_equivalent_value(5), "The median equivalent value to 5 is 5");
     assert_eq!(
         4001,
         histogram.median_equivalent_value(4000),
@@ -391,11 +368,9 @@ struct DataHistograms {
 fn build_data_histograms() -> DataHistograms {
     let highest_trackable_value = 3_600_u64 * 1000 * 1000;
     let mut histogram = Histogram::<u64>::with_high_sigvdig(highest_trackable_value, SIG_V_DIGITS).unwrap();
-    let mut scaled_histogram =
-        Histogram::<u64>::with_low_high_sigvdig(1000, highest_trackable_value * 512, SIG_V_DIGITS).unwrap();
+    let mut scaled_histogram = Histogram::<u64>::with_low_high_sigvdig(1000, highest_trackable_value * 512, SIG_V_DIGITS).unwrap();
     let mut raw_histogram = Histogram::<u64>::with_high_sigvdig(highest_trackable_value, SIG_V_DIGITS).unwrap();
-    let mut scaled_raw_histogram =
-        Histogram::<u64>::with_low_high_sigvdig(1000, highest_trackable_value * 512, SIG_V_DIGITS).unwrap();
+    let mut scaled_raw_histogram = Histogram::<u64>::with_low_high_sigvdig(1000, highest_trackable_value * 512, SIG_V_DIGITS).unwrap();
 
     for _ in 0..10000 {
         succ!(histogram.record_value_with_expected_interval(1000, 10000));
@@ -426,8 +401,10 @@ fn data_access_scaling_equivalence() {
     );
     assert_eq!(data.histogram.get_total_count(), data.scaled_histogram.get_total_count());
     assert_eq!(
-        data.scaled_histogram.highest_equivalent_value(data.histogram.get_value_at_percentile(99.0) * 512),
-        data.scaled_histogram.highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0))
+        data.scaled_histogram
+            .highest_equivalent_value(data.histogram.get_value_at_percentile(99.0) * 512),
+        data.scaled_histogram
+            .highest_equivalent_value(data.scaled_histogram.get_value_at_percentile(99.0))
     );
     assert_eq!(
         data.scaled_histogram.highest_equivalent_value(data.histogram.get_max_value() * 512),
@@ -452,10 +429,8 @@ fn data_access_raw_and_corrected_stats() {
     assert_approx_eq!(expected_raw_mean, data.raw_histogram.get_mean(), expected_raw_mean * 0.001);
     assert_approx_eq!(expected_mean, data.histogram.get_mean(), expected_mean * 0.001);
 
-    let expected_raw_stddev: f64 = (((10000.0 * (1000.0 - expected_raw_mean).powi(2))
-        + (100000000.0 - expected_raw_mean).powi(2))
-        / 10001.0)
-        .sqrt();
+    let expected_raw_stddev: f64 =
+        (((10000.0 * (1000.0 - expected_raw_mean).powi(2)) + (100000000.0 - expected_raw_mean).powi(2)) / 10001.0).sqrt();
     let mut expected_square_deviation_sum: f64 = 10000.0 * (1000.0 - expected_mean).powi(2);
     let mut curr_val: f64 = 10000.0;
     while curr_val <= 100000000.0 {
@@ -478,21 +453,9 @@ fn data_access_raw_and_corrected_stats() {
 #[test]
 fn data_access_get_value_at_percentile() {
     let data = build_data_histograms();
-    assert_approx_eq!(
-        1000.0,
-        data.raw_histogram.get_value_at_percentile(30.0) as f64,
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        1000.0,
-        data.raw_histogram.get_value_at_percentile(99.0) as f64,
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        1000.0,
-        data.raw_histogram.get_value_at_percentile(99.99) as f64,
-        1000.0 * 0.001
-    );
+    assert_approx_eq!(1000.0, data.raw_histogram.get_value_at_percentile(30.0) as f64, 1000.0 * 0.001);
+    assert_approx_eq!(1000.0, data.raw_histogram.get_value_at_percentile(99.0) as f64, 1000.0 * 0.001);
+    assert_approx_eq!(1000.0, data.raw_histogram.get_value_at_percentile(99.99) as f64, 1000.0 * 0.001);
     assert_approx_eq!(
         100000000.0,
         data.raw_histogram.get_value_at_percentile(99.999) as f64,
@@ -504,31 +467,11 @@ fn data_access_get_value_at_percentile() {
         100000000.0 * 0.001
     );
 
-    assert_approx_eq!(
-        1000.0,
-        data.histogram.get_value_at_percentile(30.0) as f64,
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        1000.0,
-        data.histogram.get_value_at_percentile(50.0) as f64,
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        50000000.0,
-        data.histogram.get_value_at_percentile(75.0) as f64,
-        50000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        80000000.0,
-        data.histogram.get_value_at_percentile(90.0) as f64,
-        80000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        98000000.0,
-        data.histogram.get_value_at_percentile(99.0) as f64,
-        98000000.0 * 0.001
-    );
+    assert_approx_eq!(1000.0, data.histogram.get_value_at_percentile(30.0) as f64, 1000.0 * 0.001);
+    assert_approx_eq!(1000.0, data.histogram.get_value_at_percentile(50.0) as f64, 1000.0 * 0.001);
+    assert_approx_eq!(50000000.0, data.histogram.get_value_at_percentile(75.0) as f64, 50000000.0 * 0.001);
+    assert_approx_eq!(80000000.0, data.histogram.get_value_at_percentile(90.0) as f64, 80000000.0 * 0.001);
+    assert_approx_eq!(98000000.0, data.histogram.get_value_at_percentile(99.0) as f64, 98000000.0 * 0.001);
     assert_approx_eq!(
         100000000.0,
         data.histogram.get_value_at_percentile(99.999) as f64,
@@ -591,41 +534,13 @@ fn various_stats() {
 fn value_at_percentile() {
     let histogram = stat_histo();
 
-    assert_approx_eq!(
-        1000.0,
-        histogram.get_value_at_percentile(30.0),
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        1000.0,
-        histogram.get_value_at_percentile(50.0),
-        1000.0 * 0.001
-    );
-    assert_approx_eq!(
-        50000000.0,
-        histogram.get_value_at_percentile(75.0),
-        50000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        80000000.0,
-        histogram.get_value_at_percentile(90.0),
-        80000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        98000000.0,
-        histogram.get_value_at_percentile(99.0),
-        98000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        100000000.0,
-        histogram.get_value_at_percentile(99.999),
-        100000000.0 * 0.001
-    );
-    assert_approx_eq!(
-        100000000.0,
-        histogram.get_value_at_percentile(100.0),
-        100000000.0 * 0.001
-    );
+    assert_approx_eq!(1000.0, histogram.get_value_at_percentile(30.0), 1000.0 * 0.001);
+    assert_approx_eq!(1000.0, histogram.get_value_at_percentile(50.0), 1000.0 * 0.001);
+    assert_approx_eq!(50000000.0, histogram.get_value_at_percentile(75.0), 50000000.0 * 0.001);
+    assert_approx_eq!(80000000.0, histogram.get_value_at_percentile(90.0), 80000000.0 * 0.001);
+    assert_approx_eq!(98000000.0, histogram.get_value_at_percentile(99.0), 98000000.0 * 0.001);
+    assert_approx_eq!(100000000.0, histogram.get_value_at_percentile(99.999), 100000000.0 * 0.001);
+    assert_approx_eq!(100000000.0, histogram.get_value_at_percentile(100.0), 100000000.0 * 0.001);
 }
 
 #[test]
@@ -641,18 +556,9 @@ fn get_value_at_percentile_for_large_histogram() {
 #[test]
 fn test_get_percentile_at_or_below_value() {
     let histogram = stat_histo();
-    assert_approx_eq!(
-        50.0,
-        histogram.get_percentile_at_or_below_value(5000),
-        0.0001
-    );
-    assert_approx_eq!(
-        100.0,
-        histogram.get_percentile_at_or_below_value(100000000),
-        0.0001
-    );
+    assert_approx_eq!(50.0, histogram.get_percentile_at_or_below_value(5000), 0.0001);
+    assert_approx_eq!(100.0, histogram.get_percentile_at_or_below_value(100000000), 0.0001);
 }
-
 
 #[test]
 fn reset() {
@@ -689,7 +595,6 @@ fn value_at_percentile_matches_percentile() {
                 value
             );
         }
-        assert!(true);
     }
 }
 
@@ -800,10 +705,7 @@ fn subtract_to_negative_counts_throws() {
     succ!(other.record_value_with_count(TEST_VALUE_LEVEL, 2));
     succ!(other.record_value_with_count(TEST_VALUE_LEVEL * 1000, 2));
 
-    assert!(matches!(
-        histogram.subtract(&other),
-        Err(SubtractionError::CountExceededAtValue)
-    ));
+    assert!(matches!(histogram.subtract(&other), Err(SubtractionError::CountExceededAtValue)));
     assert_eq!(Some(1), histogram.get_count_at_value(TEST_VALUE_LEVEL));
     assert_eq!(Some(1), histogram.get_count_at_value(TEST_VALUE_LEVEL * 1000));
     verify_max_value(histogram);
@@ -822,10 +724,7 @@ fn subtract_subtrahend_values_outside_range_throws() {
     succ!(bigger_other.record_value(TEST_VALUE_LEVEL * 1000));
     succ!(bigger_other.record_value(highest * 2));
 
-    assert!(matches!(
-        histogram.subtract(&bigger_other),
-        Err(SubtractionError::ValueOutOfRange)
-    ));
+    assert!(matches!(histogram.subtract(&bigger_other), Err(SubtractionError::ValueOutOfRange)));
     verify_max_value(histogram);
     verify_max_value(bigger_other);
 }
@@ -934,4 +833,17 @@ fn histogram_shift_non_lowest_bucket() {
         succ!(histogram.shift_values_right(shift_amount));
         assert!(histogram.equals(&original));
     }
+}
+
+#[test]
+fn histogram_resize_preserves_counts_after_right_shift() {
+    let mut histogram = Histogram::<u64>::with_high_sigvdig(1_000_000, SIG_V_DIGITS).unwrap();
+    succ!(histogram.record_value(65_536));
+    succ!(histogram.shift_values_right(1));
+
+    assert_eq!(Some(1), histogram.get_count_at_value(32_768));
+    succ!(histogram.resize(16_000_000));
+
+    assert_eq!(1, histogram.get_total_count());
+    assert_eq!(Some(1), histogram.get_count_at_value(32_768));
 }

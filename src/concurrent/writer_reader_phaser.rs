@@ -12,7 +12,6 @@
 //! before finally calling `rg.flip()` once they are done executing the swap.
 
 use parking_lot::{Mutex, MutexGuard};
-use std::isize::MIN as ISIZE_MIN;
 use std::mem;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::thread;
@@ -30,7 +29,7 @@ impl WriterReaderPhaser {
     pub fn new() -> WriterReaderPhaser {
         let start = AtomicIsize::new(0);
         let even_end = AtomicIsize::new(0);
-        let odd_end = AtomicIsize::new(ISIZE_MIN);
+        let odd_end = AtomicIsize::new(isize::MIN);
 
         WriterReaderPhaser {
             start_epoch: start,
@@ -56,7 +55,7 @@ impl WriterReaderPhaser {
     pub fn reader_lock<'a>(&'a self) -> PhaseFlipGuard<'a> {
         let guard = self.reader_lock.lock();
         PhaseFlipGuard {
-            parent: &self,
+            parent: self,
             _guard: guard,
         }
     }
@@ -89,26 +88,20 @@ impl<'a> PhaseFlipGuard<'a> {
     pub fn flip_with_yield_time(&self, yield_time: Duration) {
         let next_phase_is_even = self.parent.start_epoch.load(Ordering::SeqCst) < 0;
 
-        let initial_start_value = if next_phase_is_even { 0 } else { ISIZE_MIN };
+        let initial_start_value = if next_phase_is_even { 0 } else { isize::MIN };
         if next_phase_is_even {
-            self.parent
-                .even_end_epoch
-                .store(initial_start_value, Ordering::Relaxed);
+            self.parent.even_end_epoch.store(initial_start_value, Ordering::Relaxed);
         } else {
-            self.parent
-                .odd_end_epoch
-                .store(initial_start_value, Ordering::Relaxed);
+            self.parent.odd_end_epoch.store(initial_start_value, Ordering::Relaxed);
         }
 
-        let start_value_at_flip = self.parent
-            .start_epoch
-            .swap(initial_start_value, Ordering::SeqCst);
+        let start_value_at_flip = self.parent.start_epoch.swap(initial_start_value, Ordering::SeqCst);
 
         loop {
             let caught_up = if next_phase_is_even {
-                self.parent.odd_end_epoch.load(Ordering::Relaxed) == start_value_at_flip
+                self.parent.odd_end_epoch.load(Ordering::Acquire) == start_value_at_flip
             } else {
-                self.parent.even_end_epoch.load(Ordering::Relaxed) == start_value_at_flip
+                self.parent.even_end_epoch.load(Ordering::Acquire) == start_value_at_flip
             };
             if !caught_up {
                 if yield_time.as_secs() == 0 && yield_time.subsec_nanos() == 0 {

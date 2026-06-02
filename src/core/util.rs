@@ -4,7 +4,7 @@ use crate::core::ReadableHistogram;
 // this will work for two's complement floats if ints have the same endianness on the platform as floats
 pub fn next_below(value: f64) -> f64 {
     if value.is_nan() {
-        return value;
+        value
     } else {
         let mut transient = value.to_bits();
 
@@ -52,14 +52,27 @@ pub fn normalize_index(index: u32, normalizing_index_offset: i32, array_length: 
     normalized as u32
 }
 
+#[inline(always)]
+pub fn normalize_index_offset(offset: i64, array_length: u32) -> i32 {
+    if array_length == 0 {
+        return 0;
+    }
+    (offset % array_length as i64) as i32
+}
+
 #[macro_export]
 macro_rules! check_eq {
     ($left:expr, $right:expr) => {
-        if $left != $right { return false; }
-    }
+        if $left != $right {
+            return false;
+        }
+    };
 }
 
-pub fn recalculate_internal_tracking_values<H: ReadableHistogram>(histogram: &mut H, length_to_cover: u32) -> (Option<u32>, Option<u32>, u64) {
+pub fn recalculate_internal_tracking_values<H: ReadableHistogram>(
+    histogram: &mut H,
+    length_to_cover: u32,
+) -> (Option<u32>, Option<u32>, u64) {
     let mut new_max = None;
     let mut new_min = None;
     let mut new_total = 0;

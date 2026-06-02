@@ -1,20 +1,22 @@
 use crate::core::{HistogramSettings, ReadableHistogram};
-use crate::iteration::*;
+use crate::iteration::iteration_state::IterationState;
+use crate::iteration::iteration_strategy::IterationStrategy;
+use crate::iteration::IterationValue;
 
-pub struct HistogramIterator<'a, T: 'a, S> {
-    pub(in crate::iteration) histogram: &'a T,
+pub struct HistogramIterator<H, S> {
+    pub(in crate::iteration) histogram: H,
     pub(in crate::iteration) state: IterationState,
     pub(in crate::iteration) strategy: S,
 }
 
-impl<'a, T: ReadableHistogram, S: IterationStrategy<T>> HistogramIterator<'a, T, S> {
+impl<H: ReadableHistogram, S: IterationStrategy<H>> HistogramIterator<H, S> {
     pub fn next_value(&mut self) -> Option<IterationValue> {
         let state = &mut self.state;
         let strategy = &mut self.strategy;
-        let histogram = &*self.histogram;
-        let settings = self.histogram.settings();
+        let histogram = &self.histogram;
+        let settings = histogram.settings();
         if strategy.has_next(state, histogram) {
-            while !(state.current_index >= histogram.array_length()) {
+            while state.current_index < histogram.array_length() {
                 state.count_at_this_value = histogram.unsafe_get_count_at_index(state.current_index);
                 if state.fresh_sub_bucket {
                     state.total_count_to_current_index += state.count_at_this_value;
@@ -25,7 +27,7 @@ impl<'a, T: ReadableHistogram, S: IterationStrategy<T>> HistogramIterator<'a, T,
                 if strategy.reached_iteration_level(state, histogram) {
                     let value_iterated_to = strategy.get_value_iterated_to(state, histogram);
                     let iteration_value = IterationValue {
-                        value_iterated_to: value_iterated_to,
+                        value_iterated_to,
                         count_at_value_iterated_to: state.count_at_this_value,
                         value_iterated_from: state.prev_value_iterated_to,
                         count_added_in_this_iteration_step: state.total_count_to_current_index - state.total_count_to_prev_index,
@@ -42,7 +44,7 @@ impl<'a, T: ReadableHistogram, S: IterationStrategy<T>> HistogramIterator<'a, T,
 
                     return Some(iteration_value);
                 }
-                Self::increment_sub_bucket(state, settings);
+                Self::increment_sub_bucket(state, &settings);
             }
             panic!("should not get here - iteration level logic is faulty or histogram was modified concurrently")
         } else {

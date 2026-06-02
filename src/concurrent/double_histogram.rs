@@ -1,7 +1,13 @@
-use crate::concurrent::ResizableHistogram;
-use crate::core::{DoubleCreationError, OverflowPolicy, ReadableHistogram, RecordError, SaturateOnOverflow, ThrowOnOverflow};
+use crate::concurrent::{ResizableConcurrentHistogram, ResizableConcurrentReadView, ResizableStructuralMutation};
 use crate::core::util;
-use crate::iteration::RecordedValuesIterator;
+use crate::core::{
+    DoubleCreationError, HistogramMetaData, HistogramSettings, OverflowPolicy, ReadableHistogram, RecordError, SaturateOnOverflow,
+    ThrowOnOverflow,
+};
+use crate::iteration::{
+    DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
+    RecordedValuesIterator,
+};
 use parking_lot::Mutex;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,17 +75,175 @@ fn derive_integer_value_range(external_ratio: u64, significant_value_digits: u8)
 }
 
 pub struct ConcurrentDoubleHistogramImpl<P: OverflowPolicy> {
-    integer_histogram: ResizableHistogram,
+    integer_histogram: ResizableConcurrentHistogram,
     configured_highest_to_lowest_value_ratio: AtomicU64,
     current_lowest_value_in_auto_range: AtomicU64,
     current_highest_value_limit_in_auto_range: AtomicU64,
     auto_resize: AtomicBool,
+    range_shift_in_progress: AtomicBool,
+    range_generation: AtomicU64,
     range_lock: Mutex<()>,
     _policy: PhantomData<P>,
 }
 
+/// A structurally stable read view of a [`ConcurrentDoubleHistogramImpl`].
+///
+/// The view captures double range metadata together with an underlying integer
+/// read view from one structural epoch. Ordinary recording can still update
+/// count cells while the view is alive, so aggregate fields such as total count,
+/// min, and max are not guaranteed to be a frozen point-in-time count snapshot.
+/// Use recorder samples/snapshots when that stronger guarantee is needed.
+pub struct ConcurrentDoubleReadView<'a> {
+    integer_view: ResizableConcurrentReadView<'a>,
+    configured_highest_to_lowest_value_ratio: u64,
+    current_lowest_value_in_auto_range: f64,
+    current_highest_value_limit_in_auto_range: f64,
+    auto_resize: bool,
+}
+
 pub type ConcurrentDoubleHistogram = ConcurrentDoubleHistogramImpl<ThrowOnOverflow>;
 pub type SaturatingConcurrentDoubleHistogram = ConcurrentDoubleHistogramImpl<SaturateOnOverflow>;
+
+struct RangeShiftGate<'a> {
+    range_shift_in_progress: &'a AtomicBool,
+}
+
+enum SingleValueOutOfRangeResult {
+    Recorded,
+    Retry,
+    Continue,
+}
+
+impl Drop for RangeShiftGate<'_> {
+    fn drop(&mut self) {
+        self.range_shift_in_progress.store(false, Ordering::SeqCst);
+    }
+}
+
+impl ConcurrentDoubleReadView<'_> {
+    pub fn get_count_at_value(&self, value: f64) -> u64 {
+        let integer_value = to_integer_value_clamped_for_histogram(self, value);
+        let idx = self.settings().counts_array_index(integer_value).min(self.array_length() - 1);
+        self.unsafe_get_count_at_index(idx)
+    }
+
+    pub fn get_total_count(&self) -> u64 {
+        self.integer_view.get_total_count()
+    }
+
+    pub fn get_min_value(&self) -> f64 {
+        if self.get_total_count() == 0 || self.integer_view.unsafe_get_count_at_index(0) != 0 {
+            0.0
+        } else {
+            self.settings().lowest_equivalent_value(self.integer_view.get_min_non_zero_value()) as f64
+                * self.integer_to_double_value_conversion_ratio()
+        }
+    }
+
+    pub fn get_max_value(&self) -> f64 {
+        highest_equivalent_value_for_histogram(
+            self,
+            self.integer_view.get_max_value() as f64 * self.integer_to_double_value_conversion_ratio(),
+        )
+    }
+
+    pub fn get_mean(&self) -> f64 {
+        let mut iterator = RecordedValuesIterator::from_readable(self);
+        RecordedValuesIterator::get_mean_without_reset(&mut iterator) * self.integer_to_double_value_conversion_ratio()
+    }
+
+    pub fn get_std_deviation(&self) -> f64 {
+        let mut iterator = RecordedValuesIterator::from_readable(self);
+        RecordedValuesIterator::get_std_deviation_without_reset(&mut iterator) * self.integer_to_double_value_conversion_ratio()
+    }
+
+    pub fn get_value_at_percentile(&self, percentile: f64) -> f64 {
+        get_value_at_percentile_for_histogram(self, percentile) as f64 * self.integer_to_double_value_conversion_ratio()
+    }
+
+    pub fn get_percentile_at_or_below_value(&self, value: f64) -> f64 {
+        let integer_value = to_integer_value_clamped_for_histogram(self, value);
+        get_percentile_at_or_below_value_for_histogram(self, integer_value)
+    }
+
+    pub fn size_of_equivalent_value_range(&self, value: f64) -> f64 {
+        self.settings()
+            .size_of_equivalent_value_range(to_integer_value_clamped_for_histogram(self, value)) as f64
+            * self.integer_to_double_value_conversion_ratio()
+    }
+
+    pub fn lowest_equivalent_value(&self, value: f64) -> f64 {
+        lowest_equivalent_value_for_histogram(self, value)
+    }
+
+    pub fn highest_equivalent_value(&self, value: f64) -> f64 {
+        highest_equivalent_value_for_histogram(self, value)
+    }
+
+    pub fn median_equivalent_value(&self, value: f64) -> f64 {
+        self.settings()
+            .median_equivalent_value(to_integer_value_clamped_for_histogram(self, value)) as f64
+            * self.integer_to_double_value_conversion_ratio()
+    }
+
+    pub fn values_are_equivalent(&self, value1: f64, value2: f64) -> bool {
+        self.lowest_equivalent_value(value1) == self.lowest_equivalent_value(value2)
+    }
+
+    pub fn get_current_lowest_trackable_non_zero_value(&self) -> f64 {
+        self.current_lowest_value_in_auto_range
+    }
+
+    pub fn get_current_highest_trackable_value(&self) -> f64 {
+        self.current_highest_value_limit_in_auto_range
+    }
+
+    pub fn get_highest_to_lowest_value_ratio(&self) -> u64 {
+        self.configured_highest_to_lowest_value_ratio
+    }
+
+    pub fn get_number_of_significant_value_digits(&self) -> u8 {
+        self.settings().number_of_significant_value_digits as u8
+    }
+
+    pub fn is_auto_resize(&self) -> bool {
+        self.auto_resize
+    }
+}
+
+impl ReadableHistogram for ConcurrentDoubleReadView<'_> {
+    fn settings(&self) -> HistogramSettings {
+        self.integer_view.settings()
+    }
+
+    fn array_length(&self) -> u32 {
+        self.integer_view.array_length()
+    }
+
+    fn get_total_count(&self) -> u64 {
+        self.integer_view.get_total_count()
+    }
+
+    fn unsafe_get_count_at_index(&self, idx: u32) -> u64 {
+        self.integer_view.unsafe_get_count_at_index(idx)
+    }
+
+    fn get_max_value(&self) -> u64 {
+        self.integer_view.get_max_value()
+    }
+
+    fn meta_data(&self) -> &HistogramMetaData {
+        self.integer_view.meta_data()
+    }
+
+    fn integer_to_double_value_conversion_ratio(&self) -> f64 {
+        self.integer_view.integer_to_double_value_conversion_ratio()
+    }
+
+    fn normalizing_index_offset(&self) -> i32 {
+        self.integer_view.normalizing_index_offset()
+    }
+}
 
 impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
     pub fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
@@ -104,16 +268,12 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
             return Err(DoubleCreationError::HighestToLowestValueRatioTooLarge);
         }
 
-        let integer_value_range =
-            derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
-                .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
+        let integer_value_range = derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+            .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
         let highest_trackable_value = integer_value_range - 1;
-        let integer_histogram = ResizableHistogram::with_low_high_sigvdig(
-            1,
-            highest_trackable_value,
-            number_of_significant_value_digits,
-        )
-        .map_err(DoubleCreationError::Internal)?;
+        let integer_histogram =
+            ResizableConcurrentHistogram::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
+                .map_err(DoubleCreationError::Internal)?;
 
         let histogram = ConcurrentDoubleHistogramImpl {
             integer_histogram,
@@ -121,6 +281,8 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
             current_lowest_value_in_auto_range: AtomicU64::new(0.0_f64.to_bits()),
             current_highest_value_limit_in_auto_range: AtomicU64::new(0.0_f64.to_bits()),
             auto_resize: AtomicBool::new(false),
+            range_shift_in_progress: AtomicBool::new(false),
+            range_generation: AtomicU64::new(0),
             range_lock: Mutex::new(()),
             _policy: PhantomData,
         };
@@ -130,109 +292,84 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
     }
 
     pub fn record_value(&self, value: f64) -> Result<(), RecordError> {
-        self.record_value_with_count(value, 1)
+        self.record_single_value(value)
     }
 
     pub fn record_value_with_count(&self, value: f64, count: u64) -> Result<(), RecordError> {
         self.record_count_at_value(count, value)
     }
 
-    pub fn record_value_with_expected_interval(
-        &self,
-        value: f64,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<(), RecordError> {
+    pub fn record_value_with_expected_interval(&self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
 
+    /// Capture a structurally stable double read view.
+    ///
+    /// This preserves range metadata and backing-array mapping for encoding and
+    /// point queries. It does not prevent ordinary concurrent recordings from
+    /// updating count cells while the view is used.
+    pub fn read_view(&self) -> ConcurrentDoubleReadView<'_> {
+        let _range_guard = self.range_lock.lock();
+        let integer_view = self.integer_histogram.read_view();
+        ConcurrentDoubleReadView {
+            integer_view,
+            configured_highest_to_lowest_value_ratio: self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed),
+            current_lowest_value_in_auto_range: self.current_lowest_value_in_auto_range(),
+            current_highest_value_limit_in_auto_range: self.current_highest_value_limit_in_auto_range(),
+            auto_resize: self.auto_resize.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn get_count_at_value(&self, value: f64) -> u64 {
-        let integer_value = self.to_integer_value_clamped(value);
-        let settings = self.integer_histogram.settings();
-        let max_idx = settings.counts_array_length - 1;
-        let idx = settings.counts_array_index(integer_value);
-        let clamped_idx = if idx > max_idx { max_idx } else { idx };
-        self.integer_histogram
-            .get_count_at_index(clamped_idx)
-            .unwrap_or(0)
+        self.read_view().get_count_at_value(value)
     }
 
     pub fn get_total_count(&self) -> u64 {
-        self.integer_histogram.get_total_count()
+        self.read_view().get_total_count()
     }
 
     pub fn get_min_value(&self) -> f64 {
-        let total_count = self.integer_histogram.get_total_count();
-        if total_count == 0 {
-            return 0.0;
-        }
-        if let Some(count_at_zero) = self.integer_histogram.get_count_at_index(0) {
-            if count_at_zero > 0 {
-                return 0.0;
-            }
-        }
-        self.integer_histogram.get_min_non_zero_value() as f64 * self.integer_to_double_value_conversion_ratio()
+        self.read_view().get_min_value()
     }
 
     pub fn get_max_value(&self) -> f64 {
-        self.highest_equivalent_value(
-            self.integer_histogram.get_max_value() as f64 * self.integer_to_double_value_conversion_ratio(),
-        )
+        self.read_view().get_max_value()
     }
 
     pub fn get_mean(&self) -> f64 {
-        let mut iter = RecordedValuesIterator::new(&self.integer_histogram);
-        let mean = RecordedValuesIterator::get_mean_without_reset(&mut iter);
-        mean * self.integer_to_double_value_conversion_ratio()
+        self.read_view().get_mean()
     }
 
     pub fn get_std_deviation(&self) -> f64 {
-        let mut iter = RecordedValuesIterator::new(&self.integer_histogram);
-        let stddev = RecordedValuesIterator::get_std_deviation_without_reset(&mut iter);
-        stddev * self.integer_to_double_value_conversion_ratio()
+        self.read_view().get_std_deviation()
     }
 
     pub fn get_value_at_percentile(&self, percentile: f64) -> f64 {
-        let value = get_value_at_percentile_for_histogram(&self.integer_histogram, percentile);
-        value as f64 * self.integer_to_double_value_conversion_ratio()
+        self.read_view().get_value_at_percentile(percentile)
     }
 
     pub fn get_percentile_at_or_below_value(&self, value: f64) -> f64 {
-        let integer_value = self.to_integer_value_clamped(value);
-        get_percentile_at_or_below_value_for_histogram(&self.integer_histogram, integer_value)
+        self.read_view().get_percentile_at_or_below_value(value)
     }
 
     pub fn size_of_equivalent_value_range(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .settings()
-            .size_of_equivalent_value_range(self.to_integer_value_clamped(value)) as f64
-            * self.integer_to_double_value_conversion_ratio()
+        self.read_view().size_of_equivalent_value_range(value)
     }
 
     pub fn lowest_equivalent_value(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .settings()
-            .lowest_equivalent_value(self.to_integer_value_clamped(value)) as f64
-            * self.integer_to_double_value_conversion_ratio()
+        self.read_view().lowest_equivalent_value(value)
     }
 
     pub fn highest_equivalent_value(&self, value: f64) -> f64 {
-        let next_non_equivalent_value = self.next_non_equivalent_value(value);
-        let mut highest_equivalent_value = next_non_equivalent_value - (2.0 * ulp(next_non_equivalent_value));
-        while highest_equivalent_value + ulp(highest_equivalent_value) < next_non_equivalent_value {
-            highest_equivalent_value += ulp(highest_equivalent_value);
-        }
-        highest_equivalent_value
+        self.read_view().highest_equivalent_value(value)
     }
 
     pub fn median_equivalent_value(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .settings()
-            .median_equivalent_value(self.to_integer_value_clamped(value)) as f64
-            * self.integer_to_double_value_conversion_ratio()
+        self.read_view().median_equivalent_value(value)
     }
 
     pub fn values_are_equivalent(&self, value1: f64, value2: f64) -> bool {
-        self.lowest_equivalent_value(value1) == self.lowest_equivalent_value(value2)
+        self.read_view().values_are_equivalent(value1, value2)
     }
 
     pub fn get_current_lowest_trackable_non_zero_value(&self) -> f64 {
@@ -244,8 +381,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
     }
 
     pub fn get_highest_to_lowest_value_ratio(&self) -> u64 {
-        self.configured_highest_to_lowest_value_ratio
-            .load(Ordering::Relaxed)
+        self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed)
     }
 
     pub fn get_number_of_significant_value_digits(&self) -> u8 {
@@ -269,57 +405,84 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
     }
 
     pub fn reset(&self) {
+        let _range_guard = self.range_lock.lock();
+        let mut mutation = self.integer_histogram.begin_structural_mutation();
+        let _gate = self.close_range_shift_gate();
+        mutation.flip();
         unsafe {
-            self.integer_histogram.clear_counts();
+            mutation.clear_counts();
         }
-        let configured_ratio = self
-            .configured_highest_to_lowest_value_ratio
-            .load(Ordering::Relaxed);
+        let configured_ratio = self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed);
         let initial_lowest_value_in_auto_range = 2.0_f64.powi(800);
-        self.init(configured_ratio, initial_lowest_value_in_auto_range);
+        self.configured_highest_to_lowest_value_ratio
+            .store(configured_ratio, Ordering::Relaxed);
+        let internal_ratio = derive_internal_highest_to_lowest_value_ratio(configured_ratio);
+        let highest_value_limit = initial_lowest_value_in_auto_range * internal_ratio as f64;
+        self.set_trackable_value_range_with_mutation(&mut mutation, initial_lowest_value_in_auto_range, highest_value_limit);
+        self.publish_range_generation();
     }
 
     pub fn add(&self, other: &Self) -> Result<(), RecordError> {
-        let other_ratio = other.integer_to_double_value_conversion_ratio();
-        for value in RecordedValuesIterator::new(&other.integer_histogram) {
+        let other_view = other.read_view();
+        let other_ratio = other_view.integer_to_double_value_conversion_ratio();
+        for value in RecordedValuesIterator::from_readable(other_view) {
             let double_value = value.value_iterated_to as f64 * other_ratio;
             self.record_value_with_count(double_value, value.count_at_value_iterated_to)?;
         }
         Ok(())
     }
 
-    pub fn copy_corrected_for_coordinated_omission(
-        &self,
-        expected_interval_between_value_samples: f64,
-    ) -> Result<Self, RecordError> {
+    pub fn copy_corrected_for_coordinated_omission(&self, expected_interval_between_value_samples: f64) -> Result<Self, RecordError> {
+        let source_view = self.read_view();
+        let source_settings = source_view.settings();
+        let source_ratio = source_view.integer_to_double_value_conversion_ratio();
+
         let target = ConcurrentDoubleHistogramImpl::with_highest_to_lowest_value_ratio(
-            self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed),
-            self.get_number_of_significant_value_digits(),
+            source_view.get_highest_to_lowest_value_ratio(),
+            source_settings.number_of_significant_value_digits as u8,
         )?;
         target.set_trackable_value_range(
-            self.current_lowest_value_in_auto_range(),
-            self.current_highest_value_limit_in_auto_range(),
+            source_view.get_current_lowest_trackable_non_zero_value(),
+            source_view.get_current_highest_trackable_value(),
         );
-        target.add_while_correcting_for_coordinated_omission(self, expected_interval_between_value_samples)?;
+        target.add_view_while_correcting_for_coordinated_omission(source_view, source_ratio, expected_interval_between_value_samples)?;
         Ok(target)
     }
 
     fn init(&self, configured_highest_to_lowest_value_ratio: u64, lowest_trackable_unit_value: f64) {
         self.configured_highest_to_lowest_value_ratio
             .store(configured_highest_to_lowest_value_ratio, Ordering::Relaxed);
-        let internal_ratio =
-            derive_internal_highest_to_lowest_value_ratio(configured_highest_to_lowest_value_ratio);
+        let internal_ratio = derive_internal_highest_to_lowest_value_ratio(configured_highest_to_lowest_value_ratio);
         let highest_value_limit = lowest_trackable_unit_value * internal_ratio as f64;
         self.set_trackable_value_range(lowest_trackable_unit_value, highest_value_limit);
     }
 
     fn set_trackable_value_range(&self, lowest_value_in_auto_range: f64, highest_value_in_auto_range: f64) {
+        self.set_trackable_value_range_fields(lowest_value_in_auto_range, highest_value_in_auto_range);
+        let ratio = self.integer_to_double_value_conversion_ratio_for_lowest(lowest_value_in_auto_range);
+        self.integer_histogram.set_integer_to_double_value_conversion_ratio(ratio);
+    }
+
+    fn set_trackable_value_range_with_mutation(
+        &self,
+        mutation: &mut ResizableStructuralMutation<'_>,
+        lowest_value_in_auto_range: f64,
+        highest_value_in_auto_range: f64,
+    ) {
+        self.set_trackable_value_range_fields(lowest_value_in_auto_range, highest_value_in_auto_range);
+        let ratio = self.integer_to_double_value_conversion_ratio_for_lowest(lowest_value_in_auto_range);
+        mutation.set_integer_to_double_value_conversion_ratio(ratio);
+    }
+
+    fn set_trackable_value_range_fields(&self, lowest_value_in_auto_range: f64, highest_value_in_auto_range: f64) {
         self.current_lowest_value_in_auto_range
             .store(lowest_value_in_auto_range.to_bits(), Ordering::Relaxed);
         self.current_highest_value_limit_in_auto_range
             .store(highest_value_in_auto_range.to_bits(), Ordering::Relaxed);
-        let ratio = lowest_value_in_auto_range / self.lowest_tracking_integer_value() as f64;
-        self.integer_histogram.set_integer_to_double_value_conversion_ratio(ratio);
+    }
+
+    fn integer_to_double_value_conversion_ratio_for_lowest(&self, lowest_value_in_auto_range: f64) -> f64 {
+        lowest_value_in_auto_range / self.lowest_tracking_integer_value() as f64
     }
 
     fn current_lowest_value_in_auto_range(&self) -> f64 {
@@ -331,45 +494,11 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
     }
 
     fn lowest_tracking_integer_value(&self) -> u64 {
-        self.integer_histogram.settings().sub_bucket_half_count as u64
+        self.integer_histogram.lowest_tracking_integer_value()
     }
 
     fn integer_to_double_value_conversion_ratio(&self) -> f64 {
-        self.current_lowest_value_in_auto_range() / self.lowest_tracking_integer_value() as f64
-    }
-
-    fn double_to_integer_value_conversion_ratio(&self) -> f64 {
-        self.lowest_tracking_integer_value() as f64 / self.current_lowest_value_in_auto_range()
-    }
-
-    fn to_integer_value(&self, value: f64, ratio: f64) -> Result<u64, RecordError> {
-        if !value.is_finite() || value < 0.0 {
-            return Err(RecordError::ValueOutOfRangeResizeDisabled);
-        }
-        let scaled = value * ratio;
-        if scaled > u64::MAX as f64 {
-            return Err(RecordError::ValueOutOfRangeResizeDisabled);
-        }
-        Ok(scaled as u64)
-    }
-
-    fn to_integer_value_clamped(&self, value: f64) -> u64 {
-        if !value.is_finite() || value <= 0.0 {
-            return 0;
-        }
-        let ratio = self.double_to_integer_value_conversion_ratio();
-        let scaled = value * ratio;
-        if scaled > u64::MAX as f64 {
-            return u64::MAX;
-        }
-        scaled as u64
-    }
-
-    fn next_non_equivalent_value(&self, value: f64) -> f64 {
-        self.integer_histogram
-            .settings()
-            .next_non_equivalent_value(self.to_integer_value_clamped(value)) as f64
-            * self.integer_to_double_value_conversion_ratio()
+        self.integer_histogram.integer_to_double_value_conversion_ratio()
     }
 
     fn record_value_with_count_and_expected_interval(
@@ -390,19 +519,130 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
         Ok(())
     }
 
+    #[inline(always)]
+    fn record_single_value(&self, value: f64) -> Result<(), RecordError> {
+        let mut throw_count = 0;
+        'record: loop {
+            let observed_range_generation = self.range_generation.load(Ordering::Acquire);
+            let current_lowest = self.current_lowest_value_in_auto_range();
+            let current_highest = self.current_highest_value_limit_in_auto_range();
+
+            if !(value >= current_lowest && value < current_highest) {
+                match self.record_single_value_out_of_range(value, current_lowest, observed_range_generation)? {
+                    SingleValueOutOfRangeResult::Recorded => return Ok(()),
+                    SingleValueOutOfRangeResult::Retry => {
+                        std::hint::spin_loop();
+                        continue 'record;
+                    }
+                    SingleValueOutOfRangeResult::Continue => {}
+                }
+            }
+
+            let result = if P::SATURATE {
+                self.integer_histogram.record_in_range_converted_double_value_saturating_guarded(
+                    value,
+                    &self.range_shift_in_progress,
+                    &self.range_generation,
+                    observed_range_generation,
+                )
+            } else {
+                self.integer_histogram.record_in_range_converted_double_value_guarded(
+                    value,
+                    &self.range_shift_in_progress,
+                    &self.range_generation,
+                    observed_range_generation,
+                )
+            };
+
+            match result {
+                Ok(true) => return Ok(()),
+                Ok(false) => std::hint::spin_loop(),
+                Err(_) => {
+                    throw_count += 1;
+                    if throw_count > 64 {
+                        return Err(RecordError::ValueOutOfRangeResizeDisabled);
+                    }
+                }
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn record_single_value_out_of_range(
+        &self,
+        value: f64,
+        current_lowest: f64,
+        observed_range_generation: u64,
+    ) -> Result<SingleValueOutOfRangeResult, RecordError> {
+        if !value.is_finite() {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
+        if value == 0.0 {
+            return match self
+                .integer_histogram
+                .record_value_with_count_strict_guarded(0, 1, &self.range_shift_in_progress)?
+            {
+                true => Ok(SingleValueOutOfRangeResult::Recorded),
+                false => Ok(SingleValueOutOfRangeResult::Retry),
+            };
+        }
+        if value < 0.0 {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
+
+        if let Err(err) = self.auto_adjust_range_for_value(value) {
+            if P::SATURATE {
+                if value < current_lowest {
+                    let clamped_value = current_lowest;
+                    return match self.integer_histogram.record_in_range_converted_double_value_saturating_guarded(
+                        clamped_value,
+                        &self.range_shift_in_progress,
+                        &self.range_generation,
+                        observed_range_generation,
+                    )? {
+                        true => Ok(SingleValueOutOfRangeResult::Recorded),
+                        false => Ok(SingleValueOutOfRangeResult::Retry),
+                    };
+                }
+                return match self.integer_histogram.record_converted_double_value_with_count_saturating_guarded(
+                    value,
+                    1,
+                    &self.range_shift_in_progress,
+                    &self.range_generation,
+                    observed_range_generation,
+                )? {
+                    true => Ok(SingleValueOutOfRangeResult::Recorded),
+                    false => Ok(SingleValueOutOfRangeResult::Retry),
+                };
+            }
+            return Err(err);
+        }
+
+        Ok(SingleValueOutOfRangeResult::Continue)
+    }
+
     fn record_count_at_value(&self, count: u64, value: f64) -> Result<(), RecordError> {
         if !value.is_finite() {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
         if value == 0.0 {
-            return self.integer_histogram.record_value_with_count_strict(0, count);
+            loop {
+                match self
+                    .integer_histogram
+                    .record_value_with_count_strict_guarded(0, count, &self.range_shift_in_progress)?
+                {
+                    true => return Ok(()),
+                    false => std::hint::spin_loop(),
+                }
+            }
         }
         if value < 0.0 {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
 
         let mut throw_count = 0;
-        loop {
+        'record: loop {
+            let observed_range_generation = self.range_generation.load(Ordering::Acquire);
             let current_lowest = self.current_lowest_value_in_auto_range();
             let current_highest = self.current_highest_value_limit_in_auto_range();
 
@@ -411,25 +651,51 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
                     if P::SATURATE {
                         if value < current_lowest {
                             let clamped_value = current_lowest;
-                            let integer_value =
-                                self.to_integer_value(clamped_value, self.double_to_integer_value_conversion_ratio())?;
-                            return self
-                                .integer_histogram
-                                .record_value_with_count_strict(integer_value, count);
+                            loop {
+                                match self.integer_histogram.record_converted_double_value_with_count_saturating_guarded(
+                                    clamped_value,
+                                    count,
+                                    &self.range_shift_in_progress,
+                                    &self.range_generation,
+                                    observed_range_generation,
+                                )? {
+                                    true => return Ok(()),
+                                    false => {
+                                        std::hint::spin_loop();
+                                        continue 'record;
+                                    }
+                                }
+                            }
                         }
-                        let integer_value = self.to_integer_value(value, self.double_to_integer_value_conversion_ratio())?;
-                        return self.integer_histogram.record_value_with_count(integer_value, count);
+                        loop {
+                            match self.integer_histogram.record_converted_double_value_with_count_saturating_guarded(
+                                value,
+                                count,
+                                &self.range_shift_in_progress,
+                                &self.range_generation,
+                                observed_range_generation,
+                            )? {
+                                true => return Ok(()),
+                                false => {
+                                    std::hint::spin_loop();
+                                    continue 'record;
+                                }
+                            }
+                        }
                     }
                     return Err(err);
                 }
             }
 
-            let integer_value = self.to_integer_value(value, self.double_to_integer_value_conversion_ratio())?;
-            match self
-                .integer_histogram
-                .record_value_with_count_strict(integer_value, count)
-            {
-                Ok(()) => return Ok(()),
+            match self.integer_histogram.record_converted_double_value_with_count_guarded(
+                value,
+                count,
+                &self.range_shift_in_progress,
+                &self.range_generation,
+                observed_range_generation,
+            ) {
+                Ok(true) => return Ok(()),
+                Ok(false) => std::hint::spin_loop(),
                 Err(_) => {
                     throw_count += 1;
                     if throw_count > 64 {
@@ -454,8 +720,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
             if value < current_lowest {
                 let shift_amount = find_capped_containing_binary_order_of_magnitude(
                     (current_lowest / value).ceil() - 1.0,
-                    self.configured_highest_to_lowest_value_ratio
-                        .load(Ordering::Relaxed),
+                    self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed),
                 );
                 self.shift_covered_range_to_the_right(shift_amount)?;
                 continue;
@@ -466,8 +731,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
                 }
                 let shift_amount = find_capped_containing_binary_order_of_magnitude(
                     ((value + ulp(value)) / current_highest).ceil() - 1.0,
-                    self.configured_highest_to_lowest_value_ratio
-                        .load(Ordering::Relaxed),
+                    self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed),
                 );
                 self.shift_covered_range_to_the_left(shift_amount)?;
                 continue;
@@ -477,59 +741,92 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
         Ok(())
     }
 
+    fn close_range_shift_gate(&self) -> RangeShiftGate<'_> {
+        let was_closed = self.range_shift_in_progress.swap(true, Ordering::SeqCst);
+        debug_assert!(!was_closed);
+        RangeShiftGate {
+            range_shift_in_progress: &self.range_shift_in_progress,
+        }
+    }
+
+    fn publish_range_generation(&self) {
+        self.range_generation.fetch_add(1, Ordering::Release);
+    }
+
     fn shift_covered_range_to_the_right(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
         let mut new_lowest = self.current_lowest_value_in_auto_range();
         let mut new_highest = self.current_highest_value_limit_in_auto_range();
+        let original_lowest = new_lowest;
+        let original_highest = new_highest;
         let shift_multiplier = 1.0 / (1_u64 << number_of_binary_orders_of_magnitude) as f64;
+
+        let mut mutation = self.integer_histogram.begin_structural_mutation();
+        let _gate = self.close_range_shift_gate();
+        mutation.flip();
+
+        let new_integer_to_double_value_conversion_ratio = mutation.integer_to_double_value_conversion_ratio() * shift_multiplier;
         self.current_highest_value_limit_in_auto_range
             .store((new_highest * shift_multiplier).to_bits(), Ordering::Relaxed);
 
         let result = (|| {
-            if self.integer_histogram.get_total_count()
-                > self.integer_histogram.get_count_at_index(0).unwrap_or(0)
-            {
-                if self
-                    .integer_histogram
-                    .shift_values_left(number_of_binary_orders_of_magnitude)
+            if self.integer_histogram.get_total_count() > mutation.count_at_index(0)
+                && mutation
+                    .shift_values_left_with_conversion_ratio(
+                        number_of_binary_orders_of_magnitude,
+                        new_integer_to_double_value_conversion_ratio,
+                    )
                     .is_err()
-                {
-                    self.handle_shift_values_exception(number_of_binary_orders_of_magnitude)?;
-                    new_highest /= shift_multiplier;
-                    self.integer_histogram
-                        .shift_values_left(number_of_binary_orders_of_magnitude)
-                        .map_err(|_| RecordError::ValueOutOfRangeResizeDisabled)?;
-                }
+            {
+                self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;
+                new_highest /= shift_multiplier;
+                mutation
+                    .shift_values_left_with_conversion_ratio(
+                        number_of_binary_orders_of_magnitude,
+                        new_integer_to_double_value_conversion_ratio,
+                    )
+                    .map_err(|_| RecordError::ValueOutOfRangeResizeDisabled)?;
             }
             new_lowest *= shift_multiplier;
             new_highest *= shift_multiplier;
             Ok(())
         })();
 
-        self.set_trackable_value_range(new_lowest, new_highest);
+        if result.is_ok() {
+            self.set_trackable_value_range_with_mutation(&mut mutation, new_lowest, new_highest);
+            self.publish_range_generation();
+        } else {
+            self.set_trackable_value_range_fields(original_lowest, original_highest);
+        }
         result
     }
 
     fn shift_covered_range_to_the_left(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
         let mut new_lowest = self.current_lowest_value_in_auto_range();
         let mut new_highest = self.current_highest_value_limit_in_auto_range();
+        let original_lowest = new_lowest;
+        let original_highest = new_highest;
         let shift_multiplier = 1.0 * (1_u64 << number_of_binary_orders_of_magnitude) as f64;
+
+        let mut mutation = self.integer_histogram.begin_structural_mutation();
+        let _gate = self.close_range_shift_gate();
+        mutation.flip();
+
+        let new_integer_to_double_value_conversion_ratio = mutation.integer_to_double_value_conversion_ratio() * shift_multiplier;
         self.current_lowest_value_in_auto_range
             .store((new_lowest * shift_multiplier).to_bits(), Ordering::Relaxed);
 
         let result = (|| {
-            if self.integer_histogram.get_total_count()
-                > self.integer_histogram.get_count_at_index(0).unwrap_or(0)
-            {
-                match self
-                    .integer_histogram
-                    .shift_values_right(number_of_binary_orders_of_magnitude)
-                {
+            if self.integer_histogram.get_total_count() > mutation.count_at_index(0) {
+                match mutation.shift_values_right_with_conversion_ratio(
+                    number_of_binary_orders_of_magnitude,
+                    new_integer_to_double_value_conversion_ratio,
+                ) {
                     Ok(()) => {
                         new_lowest *= shift_multiplier;
                         new_highest *= shift_multiplier;
                     }
                     Err(_) => {
-                        self.handle_shift_values_exception(number_of_binary_orders_of_magnitude)?;
+                        self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;
                         new_lowest /= shift_multiplier;
                     }
                 }
@@ -539,39 +836,44 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
             Ok(())
         })();
 
-        self.set_trackable_value_range(new_lowest, new_highest);
+        if result.is_ok() {
+            self.set_trackable_value_range_with_mutation(&mut mutation, new_lowest, new_highest);
+            self.publish_range_generation();
+        } else {
+            self.set_trackable_value_range_fields(original_lowest, original_highest);
+        }
         result
     }
 
-    fn handle_shift_values_exception(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
+    fn handle_shift_values_exception(
+        &self,
+        mutation: &mut ResizableStructuralMutation<'_>,
+        number_of_binary_orders_of_magnitude: u32,
+    ) -> Result<(), RecordError> {
         if !self.auto_resize.load(Ordering::Relaxed) {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
-        let highest_trackable_value = self.integer_histogram.settings().highest_trackable_value;
+        let highest_trackable_value = mutation.highest_trackable_value();
         let current_containing_order = find_containing_binary_order_of_magnitude_long(highest_trackable_value);
         let new_containing_order = current_containing_order + number_of_binary_orders_of_magnitude;
         if new_containing_order > 63 {
             return Err(RecordError::ValueOutOfRangeResizeDisabled);
         }
         let new_highest_trackable_value = (1_u64 << new_containing_order) - 1;
-        self.integer_histogram
-            .resize(new_highest_trackable_value)
-            .map_err(RecordError::ResizeFailed)?;
-        let configured_ratio = self
-            .configured_highest_to_lowest_value_ratio
-            .load(Ordering::Relaxed);
+        mutation.resize(new_highest_trackable_value).map_err(RecordError::ResizeFailed)?;
+        let configured_ratio = self.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed);
         self.configured_highest_to_lowest_value_ratio
             .store(configured_ratio << number_of_binary_orders_of_magnitude, Ordering::Relaxed);
         Ok(())
     }
 
-    fn add_while_correcting_for_coordinated_omission(
+    fn add_view_while_correcting_for_coordinated_omission<H: ReadableHistogram>(
         &self,
-        other: &Self,
+        other_view: H,
+        other_ratio: f64,
         expected_interval_between_value_samples: f64,
     ) -> Result<(), RecordError> {
-        let other_ratio = other.integer_to_double_value_conversion_ratio();
-        for value in RecordedValuesIterator::new(&other.integer_histogram) {
+        for value in RecordedValuesIterator::from_readable(other_view) {
             let double_value = value.value_iterated_to as f64 * other_ratio;
             self.record_value_with_count_and_expected_interval(
                 double_value,
@@ -581,17 +883,72 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramImpl<P> {
         }
         Ok(())
     }
+
+    pub(crate) fn percentiles_snapshot(
+        &self,
+        percentile_ticks_per_half_distance: u32,
+    ) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
+        DoublePercentileIterator::from_readable(self.read_view(), percentile_ticks_per_half_distance)
+    }
+
+    pub(crate) fn linear_bucket_values_snapshot(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleReadView<'_>> {
+        DoubleLinearIterator::from_readable(self.read_view(), value_units_per_bucket)
+    }
+
+    pub(crate) fn logarithmic_bucket_values_snapshot(
+        &self,
+        value_units_in_first_bucket: f64,
+        log_base: f64,
+    ) -> DoubleLogarithmicIterator<ConcurrentDoubleReadView<'_>> {
+        DoubleLogarithmicIterator::from_readable(self.read_view(), value_units_in_first_bucket, log_base)
+    }
+
+    pub(crate) fn all_values_snapshot(&self) -> DoubleAllValuesIterator<ConcurrentDoubleReadView<'_>> {
+        DoubleAllValuesIterator::from_readable(self.read_view())
+    }
+
+    pub(crate) fn recorded_values_snapshot(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleReadView<'_>> {
+        DoubleRecordedValuesIterator::from_readable(self.read_view())
+    }
+}
+
+fn to_integer_value_clamped_with_ratio(value: f64, ratio: f64) -> u64 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    let scaled = value * ratio;
+    if scaled > u64::MAX as f64 {
+        return u64::MAX;
+    }
+    scaled as u64
+}
+
+fn to_integer_value_clamped_for_histogram<H: ReadableHistogram>(histogram: &H, value: f64) -> u64 {
+    to_integer_value_clamped_with_ratio(value, 1.0 / histogram.integer_to_double_value_conversion_ratio())
+}
+
+fn lowest_equivalent_value_for_histogram<H: ReadableHistogram>(histogram: &H, value: f64) -> f64 {
+    let integer_value = to_integer_value_clamped_for_histogram(histogram, value);
+    histogram.settings().lowest_equivalent_value(integer_value) as f64 * histogram.integer_to_double_value_conversion_ratio()
+}
+
+fn next_non_equivalent_value_for_histogram<H: ReadableHistogram>(histogram: &H, value: f64) -> f64 {
+    let integer_value = to_integer_value_clamped_for_histogram(histogram, value);
+    histogram.settings().next_non_equivalent_value(integer_value) as f64 * histogram.integer_to_double_value_conversion_ratio()
+}
+
+fn highest_equivalent_value_for_histogram<H: ReadableHistogram>(histogram: &H, value: f64) -> f64 {
+    let next_non_equivalent_value = next_non_equivalent_value_for_histogram(histogram, value);
+    let mut highest_equivalent_value = next_non_equivalent_value - (2.0 * ulp(next_non_equivalent_value));
+    while highest_equivalent_value + ulp(highest_equivalent_value) < next_non_equivalent_value {
+        highest_equivalent_value += ulp(highest_equivalent_value);
+    }
+    highest_equivalent_value
 }
 
 fn get_value_at_percentile_for_histogram<H: ReadableHistogram>(histogram: &H, percentile: f64) -> u64 {
     let one_below = util::next_below(percentile);
-    let requested_percentile = if one_below > 100.0 {
-        100.0
-    } else if one_below < 0.0 {
-        0.0
-    } else {
-        one_below
-    };
+    let requested_percentile = one_below.clamp(0.0, 100.0);
 
     let total_count = histogram.get_total_count();
     let fractional_count = (requested_percentile / 100.0) * total_count as f64;
