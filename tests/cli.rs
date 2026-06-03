@@ -30,7 +30,11 @@ fn write_temp_input(test_name: &str, contents: &str) -> PathBuf {
 }
 
 fn sample_log() -> String {
-    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
+    let mut histogram = Histogram::builder()
+        .highest_trackable_value(10_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
     format!(
         "{}{}",
@@ -40,9 +44,17 @@ fn sample_log() -> String {
 }
 
 fn tagged_log() -> String {
-    let mut untagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
+    let mut untagged = Histogram::builder()
+        .highest_trackable_value(10_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     untagged.record_value_with_count(100, 2).unwrap();
-    let mut tagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
+    let mut tagged = Histogram::builder()
+        .highest_trackable_value(10_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     tagged.record_value_with_count(1_000, 7).unwrap();
     tagged.meta_data.set_tag_string("phase-a".to_string());
     format!(
@@ -54,7 +66,7 @@ fn tagged_log() -> String {
 }
 
 fn double_log() -> String {
-    let mut histogram = DoubleHistogram::new(3).unwrap();
+    let mut histogram = DoubleHistogram::builder().significant_digits(3).build().unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
     format!(

@@ -43,8 +43,11 @@ pub fn latency_series(series: LatencySeries) -> Vec<u64> {
 }
 
 pub fn histogram_u64(series: LatencySeries, significant_value_digits: u8) -> Histogram {
-    let mut histogram = Histogram::new(significant_value_digits).unwrap();
-    histogram.set_auto_resize(true);
+    let mut histogram = Histogram::builder()
+        .significant_digits(significant_value_digits)
+        .auto_resize(true)
+        .build()
+        .unwrap();
     for value in latency_series(series) {
         histogram.record_value(value).unwrap();
     }
@@ -52,8 +55,11 @@ pub fn histogram_u64(series: LatencySeries, significant_value_digits: u8) -> His
 }
 
 pub fn histogram_u32(series: LatencySeries, significant_value_digits: u8) -> HistogramWithCounter<u32> {
-    let mut histogram = HistogramWithCounter::<u32>::new(significant_value_digits).unwrap();
-    histogram.set_auto_resize(true);
+    let mut histogram = HistogramWithCounter::<u32>::builder()
+        .significant_digits(significant_value_digits)
+        .auto_resize(true)
+        .build()
+        .unwrap();
     for value in latency_series(series) {
         histogram.record_value(value).unwrap();
     }
@@ -61,7 +67,10 @@ pub fn histogram_u32(series: LatencySeries, significant_value_digits: u8) -> His
 }
 
 pub fn double_histogram(series: LatencySeries, significant_value_digits: u8) -> DoubleHistogram {
-    let mut histogram = DoubleHistogram::new(significant_value_digits).unwrap();
+    let mut histogram = DoubleHistogram::builder()
+        .significant_digits(significant_value_digits)
+        .build()
+        .unwrap();
     for value in latency_series(series) {
         histogram.record_value(value as f64).unwrap();
     }
@@ -120,7 +129,7 @@ pub fn histogram_log(intervals: usize, significant_value_digits: u8) -> String {
         writer.write_base_time(1_700_000_000.0).unwrap();
         writer.write_legend().unwrap();
         for interval in 0..intervals {
-            let mut histogram = Histogram::new(significant_value_digits).unwrap();
+            let mut histogram = Histogram::builder().significant_digits(significant_value_digits).build().unwrap();
             histogram.set_auto_resize(true);
             for value in latency_series(LatencySeries::Mixed) {
                 histogram.record_value(value + interval as u64).unwrap();

@@ -1,6 +1,8 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
-use crate::concurrent::recorder;
-use crate::concurrent::{FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder};
+use crate::concurrent::{
+    DoubleRecorder, FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder, SaturatingSingleWriterDoubleRecorder,
+    SingleWriterDoubleRecorder, SingleWriterRecorder,
+};
 use crate::core::constants::ORIGINAL_MIN;
 use crate::core::*;
 use rand::Rng;
@@ -13,24 +15,42 @@ const HIGHEST_TRACKABLE: u64 = 3600 * 1000 * 1000;
 
 #[test]
 fn resizing_recorder() {
-    let recorder = Arc::new(recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
+    let recorder = Arc::new(
+        ResizableRecorder::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(HIGHEST_TRACKABLE)
+            .significant_digits(2)
+            .build()
+            .unwrap(),
+    );
     run_resizable_recorder_test(recorder);
 }
 
 #[test]
 fn static_recorder() {
-    let recorder = Arc::new(recorder::fixed_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
+    let recorder = Arc::new(
+        FixedRecorder::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(HIGHEST_TRACKABLE)
+            .significant_digits(2)
+            .build()
+            .unwrap(),
+    );
     run_static_recorder_test(recorder);
 }
 
 #[test]
 fn double_recorder_records_and_resamples() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1.5));
     succ!(recorder.record_value_with_count(12.0, 2));
 
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(3, sample.snapshot().get_total_count());
     assert_eq!(1, sample.snapshot().get_count_at_value(1.5));
     assert_eq!(2, sample.snapshot().get_count_at_value(12.0));
@@ -52,10 +72,14 @@ fn double_recorder_records_and_resamples() {
 
 #[test]
 fn double_recorder_interval_timestamps_are_contiguous() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1.5));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let first_start = sample.snapshot().meta_data().start_timestamp.unwrap();
     let first_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert!(first_end >= first_start);
@@ -70,10 +94,14 @@ fn double_recorder_interval_timestamps_are_contiguous() {
 
 #[test]
 fn double_recorder_preserves_counts_across_conversion_ratio_changes() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1.0));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(1, sample.snapshot().get_count_at_value(1.0));
 
     succ!(recorder.record_value(1_000_000.0));
@@ -85,10 +113,10 @@ fn double_recorder_preserves_counts_across_conversion_ratio_changes() {
 
 #[test]
 fn double_recorder_snapshot_is_stable_after_resample() {
-    let recorder = recorder::double(2).unwrap();
+    let recorder = DoubleRecorder::builder().significant_digits(2).build().unwrap();
 
     succ!(recorder.record_value_with_expected_interval(100.0, 25.0));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(4, sample.snapshot().get_total_count());
 
     succ!(recorder.record_value(200.0));
@@ -101,13 +129,18 @@ fn double_recorder_snapshot_is_stable_after_resample() {
 
 #[test]
 fn single_writer_recorder_records_and_resamples() {
-    let recorder = recorder::single_writer_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+    let recorder = SingleWriterRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(HIGHEST_TRACKABLE)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(100));
     succ!(recorder.record_value_with_count(1_000, 2));
     succ!(recorder.record_value_with_expected_interval(400, 100));
 
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(7, sample.snapshot().get_total_count());
     assert_eq!(Some(2), sample.snapshot().get_count_at_value(100));
     assert_eq!(Some(2), sample.snapshot().get_count_at_value(1_000));
@@ -126,10 +159,15 @@ fn single_writer_recorder_records_and_resamples() {
 
 #[test]
 fn single_writer_recorder_interval_timestamps_are_contiguous() {
-    let recorder = recorder::single_writer_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+    let recorder = SingleWriterRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(HIGHEST_TRACKABLE)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(100));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let first_start = sample.snapshot().meta_data.start_timestamp.unwrap();
     let first_end = sample.snapshot().meta_data.end_timestamp.unwrap();
     assert!(first_end >= first_start);
@@ -144,10 +182,14 @@ fn single_writer_recorder_interval_timestamps_are_contiguous() {
 
 #[test]
 fn single_writer_double_recorder_interval_timestamps_are_contiguous() {
-    let recorder = recorder::single_writer_double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = SingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1.5));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let first_start = sample.snapshot().integer_histogram().meta_data.start_timestamp.unwrap();
     let first_end = sample.snapshot().integer_histogram().meta_data.end_timestamp.unwrap();
     assert!(first_end >= first_start);
@@ -162,10 +204,10 @@ fn single_writer_double_recorder_interval_timestamps_are_contiguous() {
 
 #[test]
 fn single_writer_recorder_constructor_auto_resizes() {
-    let recorder = recorder::single_writer(2).unwrap();
+    let recorder = SingleWriterRecorder::builder().significant_digits(2).build().unwrap();
 
     succ!(recorder.record_value(HIGHEST_TRACKABLE));
-    let sample = recorder.locking_sample();
+    let sample = recorder.begin_interval_sample();
 
     assert_eq!(1, sample.snapshot().get_total_count());
     assert!(sample.snapshot().get_highest_trackable_value() >= HIGHEST_TRACKABLE);
@@ -174,7 +216,7 @@ fn single_writer_recorder_constructor_auto_resizes() {
 #[test]
 fn single_writer_recorder_can_sample_while_single_writer_runs() {
     const ITERATIONS: usize = 20_000;
-    let recorder = Arc::new(recorder::single_writer(2).unwrap());
+    let recorder = Arc::new(SingleWriterRecorder::builder().significant_digits(2).build().unwrap());
     let ready = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
 
@@ -194,7 +236,7 @@ fn single_writer_recorder_can_sample_while_single_writer_runs() {
     };
 
     ready.store(true, Ordering::Release);
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
         sampled_count += sample.snapshot().get_total_count();
@@ -211,13 +253,17 @@ fn single_writer_recorder_can_sample_while_single_writer_runs() {
 
 #[test]
 fn single_writer_double_recorder_records_and_resamples() {
-    let recorder = recorder::single_writer_double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = SingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1.5));
     succ!(recorder.record_value_with_count(12.0, 2));
     succ!(recorder.record_value_with_expected_interval(100.0, 25.0));
 
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(7, sample.snapshot().get_total_count());
     assert_eq!(1, sample.snapshot().get_count_at_value(1.5));
     assert_eq!(2, sample.snapshot().get_count_at_value(12.0));
@@ -235,7 +281,7 @@ fn single_writer_double_recorder_records_and_resamples() {
 #[test]
 fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
     const ITERATIONS: usize = 20_000;
-    let recorder = Arc::new(recorder::single_writer_double(2).unwrap());
+    let recorder = Arc::new(SingleWriterDoubleRecorder::builder().significant_digits(2).build().unwrap());
     let ready = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
 
@@ -255,7 +301,7 @@ fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
     };
 
     ready.store(true, Ordering::Release);
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
         sampled_count += sample.snapshot().get_total_count();
@@ -272,10 +318,14 @@ fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
 
 #[test]
 fn single_writer_double_recorder_preserves_shifted_range_across_samples() {
-    let recorder = recorder::single_writer_double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = SingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1_000_000.0));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     assert_eq!(1, sample.snapshot().get_count_at_value(1_000_000.0));
 
     succ!(recorder.record_value(1_000_000.0));
@@ -286,10 +336,14 @@ fn single_writer_double_recorder_preserves_shifted_range_across_samples() {
 
 #[test]
 fn saturating_single_writer_double_recorder_clamps_out_of_range_values() {
-    let recorder = recorder::saturating_single_writer_double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = SaturatingSingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(f64::MAX));
-    let sample = recorder.locking_sample();
+    let sample = recorder.begin_interval_sample();
 
     assert_eq!(1, sample.snapshot().get_total_count());
     assert!(sample.snapshot().get_max_value() < f64::MAX);
@@ -297,12 +351,17 @@ fn saturating_single_writer_double_recorder_clamps_out_of_range_values() {
 
 #[test]
 fn recorder_resample_resets_tracking() {
-    let recorder = recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+    let recorder = ResizableRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(HIGHEST_TRACKABLE)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(1));
     succ!(recorder.record_value(1000));
 
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     {
         let snapshot = sample.snapshot();
         assert_eq!(snapshot.get_total_count(), 2);
@@ -326,7 +385,14 @@ fn recorder_resample_resets_tracking() {
 #[test]
 fn recorder_resample_does_not_lose_concurrent_counts() {
     const ITERATIONS: usize = 50_000;
-    let recorder = Arc::new(recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap());
+    let recorder = Arc::new(
+        ResizableRecorder::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(HIGHEST_TRACKABLE)
+            .significant_digits(2)
+            .build()
+            .unwrap(),
+    );
     let ready = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
 
@@ -346,7 +412,7 @@ fn recorder_resample_does_not_lose_concurrent_counts() {
     };
 
     ready.store(true, Ordering::Release);
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let mut sampled_count = 0_u64;
     while !done.load(Ordering::Acquire) {
         sampled_count += sample.snapshot().get_total_count();
@@ -383,10 +449,15 @@ fn clear_counts_resets_metadata() {
 
 #[test]
 fn concurrent_recorder_interval_timestamps_are_contiguous() {
-    let recorder = recorder::resizable_with_low_high_sigvdig(1, HIGHEST_TRACKABLE, 2).unwrap();
+    let recorder = ResizableRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(HIGHEST_TRACKABLE)
+        .significant_digits(2)
+        .build()
+        .unwrap();
 
     succ!(recorder.record_value(100));
-    let mut sample = recorder.locking_sample();
+    let mut sample = recorder.begin_interval_sample();
     let first_start = sample.snapshot().meta_data().start_timestamp.unwrap();
     let first_end = sample.snapshot().meta_data().end_timestamp.unwrap();
     assert!(first_end >= first_start);
@@ -448,7 +519,7 @@ macro_rules! recorder_test {
                     while !ready_var.load(Ordering::Acquire) {
                         thread::yield_now();
                     }
-                    let mut sample = recorder_c.locking_sample();
+                    let mut sample = recorder_c.begin_interval_sample();
                     loop {
                         let total_sample_value = sample
                             .snapshot()
@@ -477,7 +548,7 @@ macro_rules! recorder_test {
 
             keep_sampling.store(false, Ordering::SeqCst);
 
-            let sample = recorder.locking_sample();
+            let sample = recorder.begin_interval_sample();
             let total_count = sample.snapshot().get_total_count() as usize + sampled_total_count.load(Ordering::Relaxed);
             assert_eq!(total_count, (THREAD_COUNT * NUM_VALS) as usize);
 

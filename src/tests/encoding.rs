@@ -1,4 +1,4 @@
-use crate::concurrent::{recorder, ResizableConcurrentHistogram};
+use crate::concurrent::{DoubleRecorder, ResizableConcurrentHistogram};
 use crate::core::histogram_settings::{HistogramSettings, V2_ENCODING_HEADER_SIZE, V2_ENCODING_MAX_WORD_SIZE_IN_BYTES};
 use crate::encoding::*;
 use crate::st::{DoubleHistogram, Histogram};
@@ -97,11 +97,15 @@ fn double_histogram_v2_roundtrip_preserves_counts() {
 
 #[test]
 fn concurrent_double_snapshot_v2_roundtrip_preserves_counts() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     recorder.record_value_with_count(1.5, 2).unwrap();
     recorder.record_value(12.0).unwrap();
 
-    let sample = recorder.locking_sample();
+    let sample = recorder.begin_interval_sample();
     let snapshot = sample.snapshot();
     let encoded = encode_concurrent_double_snapshot_v2(&snapshot).unwrap();
     assert_eq!(&encoded[..4], &DOUBLE_HISTOGRAM_ENCODING_COOKIE.to_be_bytes());
@@ -509,11 +513,15 @@ fn histogram_log_report_rejects_invalid_config() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     recorder.record_value_with_count(1.5, 2).unwrap();
     recorder.record_value(12.0).unwrap();
 
-    let sample = recorder.locking_sample();
+    let sample = recorder.begin_interval_sample();
     let snapshot = sample.snapshot();
     let line = encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio(&snapshot, 40.0, 41.0, 1.0).unwrap();
     let record = decode_histogram_log_line(&line).unwrap().unwrap();
@@ -534,10 +542,14 @@ fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_writer_accepts_concurrent_double_snapshot() {
-    let recorder = recorder::double_with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
     recorder.record_value(1.5).unwrap();
 
-    let sample = recorder.locking_sample();
+    let sample = recorder.begin_interval_sample();
     let snapshot = sample.snapshot();
     let mut output = Vec::new();
     {

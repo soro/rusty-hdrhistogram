@@ -1,9 +1,7 @@
-use crate::concurrent::double_histogram::{
-    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramWithPolicy, SaturatingConcurrentDoubleHistogram,
-};
-use crate::concurrent::locking_sample::{
-    DoubleLockingSample, FixedLockingSample, LockingSample, ResizableLockingSample, SingleWriterDoubleLockingSample,
-    SingleWriterLockingSample,
+use crate::concurrent::double_histogram::ConcurrentDoubleHistogramWithPolicy;
+use crate::concurrent::interval_sample::{
+    DoubleIntervalSample, FixedIntervalSample, IntervalSampleCore, ResizableIntervalSample, SingleWriterDoubleIntervalSample,
+    SingleWriterIntervalSample,
 };
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
@@ -11,9 +9,12 @@ use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::*;
 use crate::st::{DoubleHistogramWithPolicy, Histogram};
+use std::marker::PhantomData;
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::time::SystemTime;
+
+const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
 static REPORTER_INSTANCE_SEQUENCER: AtomicUsize = AtomicUsize::new(0);
 fn get_instance_id() -> usize {
@@ -34,8 +35,21 @@ pub struct FixedRecorder {
     inner: Recorder<FixedConcurrentHistogram>,
 }
 
+pub struct FixedRecorderBuilder {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+}
+
 pub struct ResizableRecorder {
     inner: Recorder<ResizableConcurrentHistogram>,
+}
+
+pub struct ResizableRecorderBuilder {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+    auto_resize: bool,
 }
 
 /// Recorder optimized for exactly one recording thread plus optional sampling.
@@ -50,12 +64,28 @@ pub struct SingleWriterRecorder {
     inactive_integer_to_double_value_conversion_ratio: f64,
 }
 
-pub type SaturatingDoubleRecorder = DoubleRecorder<SaturateOnOverflow>;
-pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorder<SaturateOnOverflow>;
+pub struct SingleWriterRecorderBuilder {
+    lowest_discernible_value: u64,
+    highest_trackable_value: u64,
+    significant_value_digits: u8,
+    auto_resize: bool,
+}
 
-pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
+pub type DoubleRecorder = DoubleRecorderWithPolicy<ThrowOnOverflow>;
+pub type SaturatingDoubleRecorder = DoubleRecorderWithPolicy<SaturateOnOverflow>;
+pub type SingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<ThrowOnOverflow>;
+pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<SaturateOnOverflow>;
+
+pub struct DoubleRecorderWithPolicy<P: OverflowPolicy> {
     instance_id: usize,
     core: RecorderCore<ConcurrentDoubleHistogramWithPolicy<P>>,
+}
+
+pub struct DoubleRecorderBuilder<P: OverflowPolicy> {
+    highest_to_lowest_value_ratio: u64,
+    number_of_significant_value_digits: u8,
+    auto_resize: bool,
+    _policy: PhantomData<P>,
 }
 
 /// Double recorder optimized for exactly one recording thread plus optional sampling.
@@ -63,7 +93,7 @@ pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
 /// Recording is kept as cheap as possible. Sampling waits for the current record
 /// operation to finish and may be delayed indefinitely by a continuously active
 /// writer; this is intentional for the single-writer variant.
-pub struct SingleWriterDoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
+pub struct SingleWriterDoubleRecorderWithPolicy<P: OverflowPolicy> {
     instance_id: usize,
     core: SingleWriterCore<DoubleHistogramWithPolicy<P>>,
     inactive_highest_to_lowest_value_ratio: u64,
@@ -71,95 +101,225 @@ pub struct SingleWriterDoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
     inactive_auto_resize: bool,
 }
 
-pub fn fixed_with_low_high_sigvdig(
-    lowest_discernible_value: u64,
-    highest_trackable_value: u64,
-    significant_value_digits: u8,
-) -> Result<FixedRecorder, CreationError> {
-    FixedConcurrentHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
+pub struct SingleWriterDoubleRecorderBuilder<P: OverflowPolicy> {
+    highest_to_lowest_value_ratio: u64,
+    number_of_significant_value_digits: u8,
+    auto_resize: bool,
+    _policy: PhantomData<P>,
+}
+
+impl FixedRecorderBuilder {
+    pub fn new() -> Self {
+        FixedRecorderBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the recorder.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn build(self) -> Result<FixedRecorder, CreationError> {
+        FixedConcurrentHistogram::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )
         .map(FixedRecorder::from_histogram)
+    }
 }
 
-pub fn resizable_with_low_high_sigvdig(
-    lowest_discernible_value: u64,
-    highest_trackable_value: u64,
-    significant_value_digits: u8,
-) -> Result<ResizableRecorder, CreationError> {
-    ResizableConcurrentHistogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
-        .map(ResizableRecorder::from_histogram)
+impl ResizableRecorderBuilder {
+    pub fn new() -> Self {
+        ResizableRecorderBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the recorder.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    /// Set the recorder's configured highest trackable value.
+    ///
+    /// When auto-resize is enabled, this is the initial range and the recorder
+    /// can grow later to accommodate larger recorded values.
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<ResizableRecorder, CreationError> {
+        let histogram = ResizableConcurrentHistogram::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(ResizableRecorder::from_histogram(histogram))
+    }
 }
 
-pub fn single_writer(significant_value_digits: u8) -> Result<SingleWriterRecorder, CreationError> {
-    SingleWriterRecorder::new(significant_value_digits)
+impl SingleWriterRecorderBuilder {
+    pub fn new() -> Self {
+        SingleWriterRecorderBuilder {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 2,
+            significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the recorder.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, significant_value_digits: u8) -> Self {
+        self.significant_value_digits = significant_value_digits;
+        self
+    }
+
+    pub fn lowest_discernible_value(mut self, lowest_discernible_value: u64) -> Self {
+        self.lowest_discernible_value = lowest_discernible_value;
+        self
+    }
+
+    /// Set the recorder's configured highest trackable value.
+    ///
+    /// When auto-resize is enabled, this is the initial range and the recorder
+    /// can grow later to accommodate larger recorded values.
+    pub fn highest_trackable_value(mut self, highest_trackable_value: u64) -> Self {
+        self.highest_trackable_value = highest_trackable_value;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<SingleWriterRecorder, CreationError> {
+        let mut histogram = Histogram::with_low_high_sigvdig(
+            self.lowest_discernible_value,
+            self.highest_trackable_value,
+            self.significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(SingleWriterRecorder::from_histogram(histogram))
+    }
 }
 
-pub fn single_writer_with_high_sigvdig(
-    highest_trackable_value: u64,
-    significant_value_digits: u8,
-) -> Result<SingleWriterRecorder, CreationError> {
-    SingleWriterRecorder::with_high_sigvdig(highest_trackable_value, significant_value_digits)
+impl<P: OverflowPolicy> DoubleRecorderBuilder<P> {
+    pub fn new() -> Self {
+        DoubleRecorderBuilder {
+            highest_to_lowest_value_ratio: 2,
+            number_of_significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+            _policy: PhantomData,
+        }
+    }
+
+    /// Set the number of decimal significant digits retained by the recorder.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, number_of_significant_value_digits: u8) -> Self {
+        self.number_of_significant_value_digits = number_of_significant_value_digits;
+        self
+    }
+
+    pub fn highest_to_lowest_value_ratio(mut self, highest_to_lowest_value_ratio: u64) -> Self {
+        self.highest_to_lowest_value_ratio = highest_to_lowest_value_ratio;
+        self
+    }
+
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
+
+    pub fn build(self) -> Result<DoubleRecorderWithPolicy<P>, DoubleCreationError> {
+        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
+            self.highest_to_lowest_value_ratio,
+            self.number_of_significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(DoubleRecorderWithPolicy::from_histogram(histogram))
+    }
 }
 
-pub fn single_writer_with_low_high_sigvdig(
-    lowest_discernible_value: u64,
-    highest_trackable_value: u64,
-    significant_value_digits: u8,
-) -> Result<SingleWriterRecorder, CreationError> {
-    SingleWriterRecorder::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
-}
+impl<P: OverflowPolicy> SingleWriterDoubleRecorderBuilder<P> {
+    pub fn new() -> Self {
+        SingleWriterDoubleRecorderBuilder {
+            highest_to_lowest_value_ratio: 2,
+            number_of_significant_value_digits: DEFAULT_SIGNIFICANT_VALUE_DIGITS,
+            auto_resize: true,
+            _policy: PhantomData,
+        }
+    }
 
-pub fn double(number_of_significant_value_digits: u8) -> Result<DoubleRecorder, DoubleCreationError> {
-    ConcurrentDoubleHistogram::new(number_of_significant_value_digits).map(DoubleRecorder::from_histogram)
-}
+    /// Set the number of decimal significant digits retained by the recorder.
+    ///
+    /// The default is `3`, which gives roughly three significant decimal digits
+    /// of precision.
+    pub fn significant_digits(mut self, number_of_significant_value_digits: u8) -> Self {
+        self.number_of_significant_value_digits = number_of_significant_value_digits;
+        self
+    }
 
-pub fn double_with_highest_to_lowest_value_ratio(
-    highest_to_lowest_value_ratio: u64,
-    number_of_significant_value_digits: u8,
-) -> Result<DoubleRecorder, DoubleCreationError> {
-    ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
-        .map(DoubleRecorder::from_histogram)
-}
+    pub fn highest_to_lowest_value_ratio(mut self, highest_to_lowest_value_ratio: u64) -> Self {
+        self.highest_to_lowest_value_ratio = highest_to_lowest_value_ratio;
+        self
+    }
 
-pub fn single_writer_double(number_of_significant_value_digits: u8) -> Result<SingleWriterDoubleRecorder, DoubleCreationError> {
-    SingleWriterDoubleRecorder::new(number_of_significant_value_digits)
-}
+    pub fn auto_resize(mut self, auto_resize: bool) -> Self {
+        self.auto_resize = auto_resize;
+        self
+    }
 
-pub fn single_writer_double_with_highest_to_lowest_value_ratio(
-    highest_to_lowest_value_ratio: u64,
-    number_of_significant_value_digits: u8,
-) -> Result<SingleWriterDoubleRecorder, DoubleCreationError> {
-    SingleWriterDoubleRecorder::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
-}
-
-pub fn saturating_double(number_of_significant_value_digits: u8) -> Result<SaturatingDoubleRecorder, DoubleCreationError> {
-    SaturatingConcurrentDoubleHistogram::new(number_of_significant_value_digits).map(DoubleRecorder::from_histogram)
-}
-
-pub fn saturating_double_with_highest_to_lowest_value_ratio(
-    highest_to_lowest_value_ratio: u64,
-    number_of_significant_value_digits: u8,
-) -> Result<SaturatingDoubleRecorder, DoubleCreationError> {
-    SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-        highest_to_lowest_value_ratio,
-        number_of_significant_value_digits,
-    )
-    .map(DoubleRecorder::from_histogram)
-}
-
-pub fn saturating_single_writer_double(
-    number_of_significant_value_digits: u8,
-) -> Result<SaturatingSingleWriterDoubleRecorder, DoubleCreationError> {
-    SaturatingSingleWriterDoubleRecorder::new(number_of_significant_value_digits)
-}
-
-pub fn saturating_single_writer_double_with_highest_to_lowest_value_ratio(
-    highest_to_lowest_value_ratio: u64,
-    number_of_significant_value_digits: u8,
-) -> Result<SaturatingSingleWriterDoubleRecorder, DoubleCreationError> {
-    SaturatingSingleWriterDoubleRecorder::with_highest_to_lowest_value_ratio(
-        highest_to_lowest_value_ratio,
-        number_of_significant_value_digits,
-    )
+    pub fn build(self) -> Result<SingleWriterDoubleRecorderWithPolicy<P>, DoubleCreationError> {
+        let mut histogram = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
+            self.highest_to_lowest_value_ratio,
+            self.number_of_significant_value_digits,
+        )?;
+        histogram.set_auto_resize(self.auto_resize);
+        Ok(SingleWriterDoubleRecorderWithPolicy::from_histogram(histogram))
+    }
 }
 
 impl<T> RecorderCore<T> {
@@ -343,12 +503,12 @@ impl<T: RecordableHistogram> Recorder<T> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
 
-    pub(crate) fn locking_sample<'a>(&'a self) -> LockingSample<'a, 'a, T> {
+    pub(crate) fn begin_interval_sample<'a>(&'a self) -> IntervalSampleCore<'a, 'a, T> {
         let pfg = self.core.reader_lock();
         let settings = unsafe { (&*self.core.active()).settings() };
         let fresh_histogram = Box::new(T::fresh(&settings).unwrap());
         let sample = self.perform_interval_sample(Box::into_raw(fresh_histogram), &pfg);
-        LockingSample::new(self, sample, pfg)
+        IntervalSampleCore::new(self, sample, pfg)
     }
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(&self, inactive_histogram: *mut T, flip_guard: &PhaseFlipGuard<'a>) -> *mut T {
@@ -403,34 +563,37 @@ macro_rules! impl_integer_recorder {
                     .record_value_with_expected_interval(value, expected_interval_between_value_samples)
             }
 
-            pub fn locking_sample<'a>(&'a self) -> $sample<'a, 'a> {
-                $sample::new(self.inner.locking_sample())
+            /// Begin sampling an interval from this recorder.
+            ///
+            /// The returned value owns the recorder's exclusive sampling lease.
+            /// Writers continue recording into the next interval while it is
+            /// alive; resampling may wait for writer calls that were already in
+            /// flight.
+            pub fn begin_interval_sample<'a>(&'a self) -> $sample<'a, 'a> {
+                $sample::new(self.inner.begin_interval_sample())
             }
         }
     };
 }
 
-impl_integer_recorder!(FixedRecorder, FixedConcurrentHistogram, FixedLockingSample);
-impl_integer_recorder!(ResizableRecorder, ResizableConcurrentHistogram, ResizableLockingSample);
+impl_integer_recorder!(FixedRecorder, FixedConcurrentHistogram, FixedIntervalSample);
+impl_integer_recorder!(ResizableRecorder, ResizableConcurrentHistogram, ResizableIntervalSample);
+
+impl FixedRecorder {
+    pub fn builder() -> FixedRecorderBuilder {
+        FixedRecorderBuilder::new()
+    }
+}
+
+impl ResizableRecorder {
+    pub fn builder() -> ResizableRecorderBuilder {
+        ResizableRecorderBuilder::new()
+    }
+}
 
 impl SingleWriterRecorder {
-    pub fn new(significant_value_digits: u8) -> Result<Self, CreationError> {
-        let mut histogram = Histogram::new(significant_value_digits)?;
-        histogram.set_auto_resize(true);
-        Ok(Self::from_histogram(histogram))
-    }
-
-    pub fn with_high_sigvdig(highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {
-        Histogram::with_high_sigvdig(highest_trackable_value, significant_value_digits).map(Self::from_histogram)
-    }
-
-    pub fn with_low_high_sigvdig(
-        lowest_discernible_value: u64,
-        highest_trackable_value: u64,
-        significant_value_digits: u8,
-    ) -> Result<Self, CreationError> {
-        Histogram::with_low_high_sigvdig(lowest_discernible_value, highest_trackable_value, significant_value_digits)
-            .map(Self::from_histogram)
+    pub fn builder() -> SingleWriterRecorderBuilder {
+        SingleWriterRecorderBuilder::new()
     }
 
     pub fn from_histogram(mut histogram: Histogram) -> Self {
@@ -483,13 +646,18 @@ impl SingleWriterRecorder {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
 
-    pub fn locking_sample<'a>(&'a self) -> SingleWriterLockingSample<'a, 'a> {
+    /// Begin sampling an interval from this recorder.
+    ///
+    /// The returned value owns the recorder's exclusive sampling lease. The
+    /// single writer continues recording into the next interval after the swap;
+    /// resampling may briefly wait for an in-flight writer call.
+    pub fn begin_interval_sample<'a>(&'a self) -> SingleWriterIntervalSample<'a, 'a> {
         let pfg = self.core.reader_lock();
         let fresh_histogram = self
             .fresh_histogram_for_inactive()
             .expect("single-writer recorder inactive histogram settings must be reusable");
         let sample = self.perform_interval_sample_locked(Box::into_raw(Box::new(fresh_histogram)), &pfg);
-        SingleWriterLockingSample::new(self, sample, pfg)
+        SingleWriterIntervalSample::new(self, sample, pfg)
     }
 
     fn fresh_histogram_for_inactive(&self) -> Result<Histogram, CreationError> {
@@ -524,10 +692,14 @@ impl SingleWriterRecorder {
     }
 }
 
-impl<P: OverflowPolicy> DoubleRecorder<P> {
+impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
+    pub fn builder() -> DoubleRecorderBuilder<P> {
+        DoubleRecorderBuilder::new()
+    }
+
     pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
         histogram.meta_data_mut().set_start_now();
-        DoubleRecorder {
+        DoubleRecorderWithPolicy {
             instance_id: get_instance_id(),
             core: RecorderCore::from_histogram(histogram),
         }
@@ -575,7 +747,12 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
 
-    pub fn locking_sample<'a>(&'a self) -> DoubleLockingSample<'a, 'a, P> {
+    /// Begin sampling an interval from this recorder.
+    ///
+    /// The returned value owns the recorder's exclusive sampling lease. Writers
+    /// continue recording into the next interval while it is alive; resampling
+    /// may wait for writer calls that were already in flight.
+    pub fn begin_interval_sample<'a>(&'a self) -> DoubleIntervalSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let active = unsafe { &*self.core.active() };
         let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
@@ -585,7 +762,7 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
         .expect("active double recorder histogram settings must be reusable");
         fresh_histogram.set_auto_resize(active.is_auto_resize());
         let sample = self.perform_interval_sample(Box::into_raw(Box::new(fresh_histogram)), &pfg);
-        DoubleLockingSample::new(self, sample, pfg)
+        DoubleIntervalSample::new(self, sample, pfg)
     }
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
@@ -602,20 +779,9 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
     }
 }
 
-impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
-    pub fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
-        DoubleHistogramWithPolicy::<P>::new(number_of_significant_value_digits).map(Self::from_histogram)
-    }
-
-    pub fn with_highest_to_lowest_value_ratio(
-        highest_to_lowest_value_ratio: u64,
-        number_of_significant_value_digits: u8,
-    ) -> Result<Self, DoubleCreationError> {
-        DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
-            highest_to_lowest_value_ratio,
-            number_of_significant_value_digits,
-        )
-        .map(Self::from_histogram)
+impl<P: OverflowPolicy> SingleWriterDoubleRecorderWithPolicy<P> {
+    pub fn builder() -> SingleWriterDoubleRecorderBuilder<P> {
+        SingleWriterDoubleRecorderBuilder::new()
     }
 
     pub fn from_histogram(mut histogram: DoubleHistogramWithPolicy<P>) -> Self {
@@ -623,7 +789,7 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
         let inactive_number_of_significant_value_digits = histogram.get_number_of_significant_value_digits();
         let inactive_auto_resize = histogram.is_auto_resize();
         histogram.meta_data_mut().set_start_now();
-        SingleWriterDoubleRecorder {
+        SingleWriterDoubleRecorderWithPolicy {
             instance_id: get_instance_id(),
             core: SingleWriterCore::from_histogram(histogram),
             inactive_highest_to_lowest_value_ratio,
@@ -676,13 +842,18 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
 
-    pub fn locking_sample<'a>(&'a self) -> SingleWriterDoubleLockingSample<'a, 'a, P> {
+    /// Begin sampling an interval from this recorder.
+    ///
+    /// The returned value owns the recorder's exclusive sampling lease. The
+    /// single writer continues recording into the next interval after the swap;
+    /// resampling may briefly wait for an in-flight writer call.
+    pub fn begin_interval_sample<'a>(&'a self) -> SingleWriterDoubleIntervalSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let fresh_histogram = self
             .fresh_histogram_for_inactive()
             .expect("single-writer double recorder inactive histogram settings must be reusable");
         let sample = self.perform_interval_sample_locked(Box::into_raw(Box::new(fresh_histogram)), &pfg);
-        SingleWriterDoubleLockingSample::new(self, sample, pfg)
+        SingleWriterDoubleIntervalSample::new(self, sample, pfg)
     }
 
     fn fresh_histogram_for_inactive(&self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {

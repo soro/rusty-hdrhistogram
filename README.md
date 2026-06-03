@@ -20,36 +20,45 @@ The library, test suite, and Criterion benchmarks build on stable Rust.
 ```rust
 use hdrhistogram::Histogram;
 
-let mut histogram = Histogram::builder()
-    .significant_digits(3)
-    .highest_trackable_value(60_000)
-    .build()
-    .unwrap();
-histogram.record_value(42).unwrap();
-histogram.record_value_with_count(1_000, 3).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut histogram = Histogram::builder()
+        .significant_digits(3)
+        .highest_trackable_value(60_000)
+        .build()?;
+    histogram.record_value(42)?;
+    histogram.record_value_with_count(1_000, 3)?;
 
-assert_eq!(histogram.get_total_count(), 4);
-assert!(histogram.get_value_at_percentile(99.0) >= 1_000);
+    assert_eq!(histogram.get_total_count(), 4);
+    assert!(histogram.get_value_at_percentile(99.0) >= 1_000);
+
+    Ok(())
+}
 ```
 
 `Histogram::builder()` builds the usual `u64` integer histogram. The
 `.significant_digits(3)` call keeps roughly three decimal significant digits of
 precision. Use
-`HistogramWithCounter::<u32>::builder().significant_digits(3)` when narrower counters are useful.
+`hdrhistogram::st::HistogramWithCounter::<u32>::builder().significant_digits(3)` when narrower counters are useful.
 
 ## Double Histograms
 
 ```rust
 use hdrhistogram::DoubleHistogram;
 
-let mut histogram = DoubleHistogram::new(3).unwrap();
-histogram.record_value(1.5).unwrap();
-histogram.record_value_with_count(10.0, 2).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut histogram = DoubleHistogram::builder()
+        .significant_digits(3)
+        .build()?;
+    histogram.record_value(1.5)?;
+    histogram.record_value_with_count(10.0, 2)?;
 
-assert_eq!(histogram.get_total_count(), 3);
+    assert_eq!(histogram.get_total_count(), 3);
 
-for value in histogram.recorded_values() {
-    assert!(value.value_iterated_to >= 0.0);
+    for value in histogram.recorded_values() {
+        assert!(value.value_iterated_to >= 0.0);
+    }
+
+    Ok(())
 }
 ```
 
@@ -62,42 +71,41 @@ shift their covered range as values move across orders of magnitude.
 
 For concurrent writers, prefer recorders over direct concurrent histogram use.
 Writers record through a lock-free phaser path, while one reader periodically
-takes a locking sample.
+begins an interval sample.
 
 ```rust
-use hdrhistogram::concurrent::recorder;
+use hdrhistogram::ResizableRecorder;
 
-let recorder = recorder::resizable_with_low_high_sigvdig(1, 60_000, 3).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let recorder = ResizableRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(60_000)
+        .significant_digits(3)
+        .build()?;
 
-recorder.record_value(100).unwrap();
-recorder.record_value(200).unwrap();
+    recorder.record_value(100)?;
+    recorder.record_value(200)?;
 
-let mut sample = recorder.locking_sample();
-assert_eq!(sample.snapshot().get_total_count(), 2);
+    let mut sample = recorder.begin_interval_sample();
+    assert_eq!(sample.snapshot().get_total_count(), 2);
 
-recorder.record_value(300).unwrap();
-sample = sample.resample();
-assert_eq!(sample.snapshot().get_total_count(), 1);
+    recorder.record_value(300)?;
+    sample = sample.resample();
+    assert_eq!(sample.snapshot().get_total_count(), 1);
+
+    Ok(())
+}
 ```
 
-Available recorder constructors include:
+Available recorder builders include:
 
-```rust
-use hdrhistogram::concurrent::recorder;
-
-recorder::single_writer;
-recorder::single_writer_with_low_high_sigvdig;
-recorder::fixed_with_low_high_sigvdig;
-recorder::resizable_with_low_high_sigvdig;
-recorder::single_writer_double;
-recorder::single_writer_double_with_highest_to_lowest_value_ratio;
-recorder::double;
-recorder::double_with_highest_to_lowest_value_ratio;
-recorder::saturating_double;
-recorder::saturating_double_with_highest_to_lowest_value_ratio;
-recorder::saturating_single_writer_double;
-recorder::saturating_single_writer_double_with_highest_to_lowest_value_ratio;
-```
+- `FixedRecorder::builder()`
+- `ResizableRecorder::builder()`
+- `SingleWriterRecorder::builder()`
+- `DoubleRecorder::builder()`
+- `SaturatingDoubleRecorder::builder()`
+- `SingleWriterDoubleRecorder::builder()`
+- `SaturatingSingleWriterDoubleRecorder::builder()`
 
 `SingleWriterRecorder` and `SingleWriterDoubleRecorder` use plain histogram
 storage behind the recorder swap path. They support one active writer plus a
@@ -110,9 +118,13 @@ rather than racing the underlying histogram.
 Concurrent histogram scan-style iteration is exposed through recorder samples,
 snapshots, and captured read views rather than direct live histogram iterators.
 The double recorder uses `ConcurrentDoubleHistogram` and the same
-`locking_sample().resample()` workflow. Its samples expose a read-only
+`begin_interval_sample().resample()` workflow. Its samples expose a read-only
 `ConcurrentDoubleSnapshot`, so sampled interval data can be queried, iterated,
 and encoded without exposing recording or reset methods.
+
+Only one interval sample may be active for a recorder at a time. Holding an
+interval sample does not stop writers from recording into the next interval;
+resampling may wait for writer calls that were already in flight.
 
 ## Usage Notes
 
@@ -155,13 +167,16 @@ Capacity planning for V2 encoding lives on `HistogramSettings`:
 ```rust
 use hdrhistogram::Histogram;
 
-let histogram = Histogram::builder()
-    .significant_digits(3)
-    .highest_trackable_value(60_000)
-    .build()
-    .unwrap();
-let capacity = histogram.settings().v2_encoding_capacity();
-assert!(capacity > 0);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let histogram = Histogram::builder()
+        .significant_digits(3)
+        .highest_trackable_value(60_000)
+        .build()?;
+    let capacity = histogram.settings().v2_encoding_capacity();
+    assert!(capacity > 0);
+
+    Ok(())
+}
 ```
 
 The optional CLI can process Java-compatible histogram logs:
@@ -183,19 +198,21 @@ cargo run --features cli --bin hdrhistogram -- -csv -i latency.hlog -o latency -
 ## API Shape
 
 The crate keeps many Java-style method names such as `record_value` and
-`get_value_at_percentile` to make HdrHistogram behavior recognizable. The main
-types are also re-exported at the crate root for Rust-style imports:
+`get_value_at_percentile` to make HdrHistogram behavior recognizable. Common
+types are re-exported at the crate root for Rust-style imports:
 
 ```rust
 use hdrhistogram::{
-    ConcurrentDoubleHistogram, DoubleHistogram, FixedConcurrentHistogram, Histogram,
-    HistogramSettings, HistogramWithCounter, ResizableConcurrentHistogram,
+    DoubleHistogram, DoubleRecorder, FixedRecorder, Histogram, HistogramSettings,
+    ResizableRecorder, SingleWriterRecorder,
 };
 ```
 
 Lower-level implementation modules such as the phaser, backing arrays, iterator
 strategies, and internal construction hooks are hidden. Most applications
-should use `Histogram`, `DoubleHistogram`, and `concurrent::recorder`.
+should use `Histogram`, `DoubleHistogram`, and the recorder types. Concurrent
+histogram, builder, policy, snapshot, and read-view types remain available from
+the `st` and `concurrent` modules when needed.
 
 ## Iteration
 
@@ -206,15 +223,18 @@ all-values, and recorded-values iterators:
 ```rust
 use hdrhistogram::Histogram;
 
-let mut histogram = Histogram::builder()
-    .significant_digits(3)
-    .highest_trackable_value(60_000)
-    .build()
-    .unwrap();
-histogram.record_value(10).unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut histogram = Histogram::builder()
+        .significant_digits(3)
+        .highest_trackable_value(60_000)
+        .build()?;
+    histogram.record_value(10)?;
 
-for value in histogram.recorded_values() {
-    assert!(value.count_at_value_iterated_to > 0);
+    for value in histogram.recorded_values() {
+        assert!(value.count_at_value_iterated_to > 0);
+    }
+
+    Ok(())
 }
 ```
 

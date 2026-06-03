@@ -5,8 +5,10 @@
 //! reader/writer APIs, and report generation require `encoding-base64`.
 
 use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
-use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, EncodableHistogram, OverflowPolicy, ReadableHistogram};
+use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, ReadableHistogram};
 use crate::st::{DoubleHistogram, DoubleHistogramWithPolicy, Histogram};
+
+pub use crate::core::{EncodableHistogram, OverflowPolicy};
 
 #[cfg(feature = "encoding-base64")]
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};

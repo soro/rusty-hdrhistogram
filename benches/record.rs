@@ -5,9 +5,10 @@ extern crate rand;
 mod common;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use hdrhistogram::concurrent::recorder;
 use hdrhistogram::concurrent::{
-    ConcurrentDoubleHistogram, FixedConcurrentHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram,
+    ConcurrentDoubleHistogram, DoubleRecorder, FixedConcurrentHistogram, FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder,
+    SaturatingConcurrentDoubleHistogram, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder,
+    SingleWriterRecorder,
 };
 use hdrhistogram::st::{DoubleHistogram, Histogram, HistogramWithCounter, SaturatingDoubleHistogram};
 use rand::Rng;
@@ -36,9 +37,73 @@ fn next_mostly_clamped_value(values: &[f64], i: &mut usize) -> f64 {
     value
 }
 
+fn fixed_recorder() -> FixedRecorder {
+    FixedRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn resizable_recorder() -> ResizableRecorder {
+    ResizableRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn single_writer_recorder() -> SingleWriterRecorder {
+    SingleWriterRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn double_recorder() -> DoubleRecorder {
+    DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn saturating_double_recorder() -> SaturatingDoubleRecorder {
+    SaturatingDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn single_writer_double_recorder() -> SingleWriterDoubleRecorder {
+    SingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
+fn saturating_single_writer_double_recorder() -> SaturatingSingleWriterDoubleRecorder {
+    SaturatingSingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+        .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+        .build()
+        .unwrap()
+}
+
 fn record_value_histogram_u64(c: &mut Criterion) {
     c.bench_function("record_value_histogram_u64", |b| {
-        let mut histogram = Histogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let mut histogram = Histogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -50,9 +115,12 @@ fn record_value_histogram_u64(c: &mut Criterion) {
 
 fn record_value_histogram_u32(c: &mut Criterion) {
     c.bench_function("record_value_histogram_u32", |b| {
-        let mut histogram =
-            HistogramWithCounter::<u32>::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS)
-                .unwrap();
+        let mut histogram = HistogramWithCounter::<u32>::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -64,8 +132,12 @@ fn record_value_histogram_u32(c: &mut Criterion) {
 
 fn record_value_fixed_concurrent_histogram(c: &mut Criterion) {
     c.bench_function("record_value_fixed_concurrent_histogram", |b| {
-        let histogram =
-            FixedConcurrentHistogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let histogram = FixedConcurrentHistogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -77,9 +149,12 @@ fn record_value_fixed_concurrent_histogram(c: &mut Criterion) {
 
 fn record_value_resizable_concurrent_histogram(c: &mut Criterion) {
     c.bench_function("record_value_resizable_concurrent_histogram", |b| {
-        let histogram =
-            ResizableConcurrentHistogram::with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS)
-                .unwrap();
+        let histogram = ResizableConcurrentHistogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -91,7 +166,7 @@ fn record_value_resizable_concurrent_histogram(c: &mut Criterion) {
 
 fn record_value_fixed_recorder(c: &mut Criterion) {
     c.bench_function("record_value_fixed_recorder", |b| {
-        let recorder = recorder::fixed_with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let recorder = fixed_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -103,8 +178,7 @@ fn record_value_fixed_recorder(c: &mut Criterion) {
 
 fn record_value_resizable_recorder(c: &mut Criterion) {
     c.bench_function("record_value_resizable_recorder", |b| {
-        let recorder =
-            recorder::resizable_with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let recorder = resizable_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -116,8 +190,7 @@ fn record_value_resizable_recorder(c: &mut Criterion) {
 
 fn record_value_single_writer_recorder(c: &mut Criterion) {
     c.bench_function("record_value_single_writer_recorder", |b| {
-        let recorder =
-            recorder::single_writer_with_low_high_sigvdig(1, common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let recorder = single_writer_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -129,8 +202,11 @@ fn record_value_single_writer_recorder(c: &mut Criterion) {
 
 fn record_value_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_double_histogram", |b| {
-        let mut histogram =
-            DoubleHistogram::with_highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let mut histogram = DoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -142,11 +218,11 @@ fn record_value_double_histogram(c: &mut Criterion) {
 
 fn record_value_saturating_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_saturating_double_histogram", |b| {
-        let mut histogram = SaturatingDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let mut histogram = SaturatingDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -158,11 +234,11 @@ fn record_value_saturating_double_histogram(c: &mut Criterion) {
 
 fn record_out_of_range_saturating_double_histogram(c: &mut Criterion) {
     c.bench_function("record_out_of_range_saturating_double_histogram", |b| {
-        let mut histogram = SaturatingDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let mut histogram = SaturatingDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
 
         b.iter(|| {
             histogram.record_value(black_box(f64::MAX)).unwrap();
@@ -172,11 +248,11 @@ fn record_out_of_range_saturating_double_histogram(c: &mut Criterion) {
 
 fn record_mostly_clamped_saturating_double_histogram(c: &mut Criterion) {
     c.bench_function("record_mostly_clamped_saturating_double_histogram", |b| {
-        let mut histogram = SaturatingDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let mut histogram = SaturatingDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let values = mostly_clamped_double_values();
         let mut i = 0_usize;
 
@@ -189,11 +265,11 @@ fn record_mostly_clamped_saturating_double_histogram(c: &mut Criterion) {
 
 fn record_value_concurrent_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_concurrent_double_histogram", |b| {
-        let histogram = ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let histogram = ConcurrentDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -205,11 +281,11 @@ fn record_value_concurrent_double_histogram(c: &mut Criterion) {
 
 fn record_value_saturating_concurrent_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_saturating_concurrent_double_histogram", |b| {
-        let histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let histogram = SaturatingConcurrentDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -221,11 +297,11 @@ fn record_value_saturating_concurrent_double_histogram(c: &mut Criterion) {
 
 fn record_out_of_range_saturating_concurrent_double_histogram(c: &mut Criterion) {
     c.bench_function("record_out_of_range_saturating_concurrent_double_histogram", |b| {
-        let histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let histogram = SaturatingConcurrentDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
 
         b.iter(|| {
             histogram.record_value(black_box(f64::MAX)).unwrap();
@@ -235,11 +311,11 @@ fn record_out_of_range_saturating_concurrent_double_histogram(c: &mut Criterion)
 
 fn record_mostly_clamped_saturating_concurrent_double_histogram(c: &mut Criterion) {
     c.bench_function("record_mostly_clamped_saturating_concurrent_double_histogram", |b| {
-        let histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let histogram = SaturatingConcurrentDoubleHistogram::builder()
+            .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
         let values = mostly_clamped_double_values();
         let mut i = 0_usize;
 
@@ -252,8 +328,7 @@ fn record_mostly_clamped_saturating_concurrent_double_histogram(c: &mut Criterio
 
 fn record_value_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_double_recorder", |b| {
-        let recorder =
-            recorder::double_with_highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE, common::SIGNIFICANT_VALUE_DIGITS).unwrap();
+        let recorder = double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -265,11 +340,7 @@ fn record_value_double_recorder(c: &mut Criterion) {
 
 fn record_value_saturating_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_saturating_double_recorder", |b| {
-        let recorder = recorder::saturating_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -281,11 +352,7 @@ fn record_value_saturating_double_recorder(c: &mut Criterion) {
 
 fn record_out_of_range_saturating_double_recorder(c: &mut Criterion) {
     c.bench_function("record_out_of_range_saturating_double_recorder", |b| {
-        let recorder = recorder::saturating_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_double_recorder();
 
         b.iter(|| {
             recorder.record_value(black_box(f64::MAX)).unwrap();
@@ -295,11 +362,7 @@ fn record_out_of_range_saturating_double_recorder(c: &mut Criterion) {
 
 fn record_mostly_clamped_saturating_double_recorder(c: &mut Criterion) {
     c.bench_function("record_mostly_clamped_saturating_double_recorder", |b| {
-        let recorder = recorder::saturating_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_double_recorder();
         let values = mostly_clamped_double_values();
         let mut i = 0_usize;
 
@@ -312,11 +375,7 @@ fn record_mostly_clamped_saturating_double_recorder(c: &mut Criterion) {
 
 fn record_value_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_single_writer_double_recorder", |b| {
-        let recorder = recorder::single_writer_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = single_writer_double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -328,11 +387,7 @@ fn record_value_single_writer_double_recorder(c: &mut Criterion) {
 
 fn record_value_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_saturating_single_writer_double_recorder", |b| {
-        let recorder = recorder::saturating_single_writer_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_single_writer_double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -344,11 +399,7 @@ fn record_value_saturating_single_writer_double_recorder(c: &mut Criterion) {
 
 fn record_out_of_range_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_out_of_range_saturating_single_writer_double_recorder", |b| {
-        let recorder = recorder::saturating_single_writer_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_single_writer_double_recorder();
 
         b.iter(|| {
             recorder.record_value(black_box(f64::MAX)).unwrap();
@@ -358,11 +409,7 @@ fn record_out_of_range_saturating_single_writer_double_recorder(c: &mut Criterio
 
 fn record_mostly_clamped_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_mostly_clamped_saturating_single_writer_double_recorder", |b| {
-        let recorder = recorder::saturating_single_writer_double_with_highest_to_lowest_value_ratio(
-            common::HIGHEST_TRACKABLE_VALUE,
-            common::SIGNIFICANT_VALUE_DIGITS,
-        )
-        .unwrap();
+        let recorder = saturating_single_writer_double_recorder();
         let values = mostly_clamped_double_values();
         let mut i = 0_usize;
 
@@ -375,7 +422,12 @@ fn record_mostly_clamped_saturating_single_writer_double_recorder(c: &mut Criter
 
 fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
     c.bench_function("record_precalc_random_values_with_1_count_u64", |b| {
-        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(u64::MAX)
+            .significant_digits(3)
+            .build()
+            .unwrap();
         let mut values = Vec::<u64>::new();
         let mut rng = rand::thread_rng();
 
@@ -393,7 +445,12 @@ fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
 
 fn bench_percentile(c: &mut Criterion) {
     c.bench_function("bench_percentile", |b| {
-        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(u64::MAX)
+            .significant_digits(3)
+            .build()
+            .unwrap();
         let mut indices = Vec::<u64>::new();
         let mut rng = rand::thread_rng();
 
@@ -415,7 +472,12 @@ fn bench_percentile(c: &mut Criterion) {
 
 fn percentile_iter(c: &mut Criterion) {
     c.bench_function("percentile_iter", |b| {
-        let mut histogram = Histogram::with_low_high_sigvdig(1, u64::MAX, 3).unwrap();
+        let mut histogram = Histogram::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(u64::MAX)
+            .significant_digits(3)
+            .build()
+            .unwrap();
         let length = 1000000;
 
         for value in 1..=length {

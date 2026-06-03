@@ -135,19 +135,19 @@ impl ResizableConcurrentHistogram {
         ResizableConcurrentHistogramBuilder::new()
     }
 
-    pub fn new(significant_value_digits: u8) -> Result<ResizableConcurrentHistogram, CreationError> {
+    pub(crate) fn new(significant_value_digits: u8) -> Result<ResizableConcurrentHistogram, CreationError> {
         ResizableConcurrentHistogram::with_sigvdig(significant_value_digits)
     }
-    pub fn with_sigvdig(significant_value_digits: u8) -> Result<ResizableConcurrentHistogram, CreationError> {
+    pub(crate) fn with_sigvdig(significant_value_digits: u8) -> Result<ResizableConcurrentHistogram, CreationError> {
         ResizableConcurrentHistogram::with_high_sigvdig(2, significant_value_digits)
     }
-    pub fn with_high_sigvdig(
+    pub(crate) fn with_high_sigvdig(
         highest_trackable_value: u64,
         significant_value_digits: u8,
     ) -> Result<ResizableConcurrentHistogram, CreationError> {
         ResizableConcurrentHistogram::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
     }
-    pub fn with_low_high_sigvdig(
+    pub(crate) fn with_low_high_sigvdig(
         lowest_discernible_value: u64,
         highest_trackable_value: u64,
         significant_value_digits: u8,

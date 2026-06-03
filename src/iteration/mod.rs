@@ -9,3 +9,4 @@ pub mod iterators;
 pub use self::iteration_error::IterationError;
 pub use self::iteration_value::{DoubleIterationValue, IterationValue};
 pub use self::iterators::*;
+pub use crate::core::IterableHistogram;

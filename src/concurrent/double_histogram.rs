@@ -461,13 +461,13 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
         ConcurrentDoubleHistogramBuilder::new()
     }
 
-    pub fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
+    pub(crate) fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
         let histogram = Self::with_highest_to_lowest_value_ratio(2, number_of_significant_value_digits)?;
         histogram.set_auto_resize(true);
         Ok(histogram)
     }
 
-    pub fn with_highest_to_lowest_value_ratio(
+    pub(crate) fn with_highest_to_lowest_value_ratio(
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {

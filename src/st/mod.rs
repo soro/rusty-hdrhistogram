@@ -11,3 +11,4 @@ mod histogram;
 
 pub use self::double_histogram::{DoubleHistogram, DoubleHistogramBuilder, DoubleHistogramWithPolicy, SaturatingDoubleHistogram};
 pub use self::histogram::{Histogram, HistogramBuilder, HistogramWithCounter};
+pub use crate::core::{Counter, OverflowPolicy, SaturateOnOverflow, ThrowOnOverflow};

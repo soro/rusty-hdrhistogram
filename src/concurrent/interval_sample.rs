@@ -1,6 +1,6 @@
 use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramWithPolicy, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
-use crate::concurrent::recorder::{DoubleRecorder, Recorder, SingleWriterDoubleRecorder, SingleWriterRecorder};
+use crate::concurrent::recorder::{DoubleRecorderWithPolicy, Recorder, SingleWriterDoubleRecorderWithPolicy, SingleWriterRecorder};
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
 use crate::concurrent::snapshot::{FixedSnapshot, ResizableSnapshot, Snapshot};
 use crate::concurrent::static_histogram::FixedConcurrentHistogram;
@@ -13,15 +13,15 @@ use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-pub(crate) struct LockingSample<'a, 'b: 'a, T: 'a + RecordableHistogram> {
+pub(crate) struct IntervalSampleCore<'a, 'b: 'a, T: 'a + RecordableHistogram> {
     parent_recorder: &'a Recorder<T>,
     histogram: AtomicPtr<T>,
     guard: PhaseFlipGuard<'b>,
 }
 
-impl<'a, 'b: 'a, T: RecordableHistogram> LockingSample<'a, 'b, T> {
+impl<'a, 'b: 'a, T: RecordableHistogram> IntervalSampleCore<'a, 'b, T> {
     pub(in crate::concurrent) fn new(parent_recorder: &'a Recorder<T>, histogram: *mut T, guard: PhaseFlipGuard<'b>) -> Self {
-        LockingSample {
+        IntervalSampleCore {
             parent_recorder,
             histogram: AtomicPtr::new(histogram),
             guard,
@@ -43,17 +43,29 @@ impl<'a, 'b: 'a, T: RecordableHistogram> LockingSample<'a, 'b, T> {
     }
 }
 
-pub struct FixedLockingSample<'a, 'b: 'a>(LockingSample<'a, 'b, FixedConcurrentHistogram>);
+/// An active sampled interval from a fixed concurrent recorder.
+///
+/// While this value is alive, it owns the recorder's exclusive sampling lease.
+/// Writers continue recording into the next interval.
+pub struct FixedIntervalSample<'a, 'b: 'a>(IntervalSampleCore<'a, 'b, FixedConcurrentHistogram>);
 
-pub struct ResizableLockingSample<'a, 'b: 'a>(LockingSample<'a, 'b, ResizableConcurrentHistogram>);
+/// An active sampled interval from a resizable concurrent recorder.
+///
+/// While this value is alive, it owns the recorder's exclusive sampling lease.
+/// Writers continue recording into the next interval.
+pub struct ResizableIntervalSample<'a, 'b: 'a>(IntervalSampleCore<'a, 'b, ResizableConcurrentHistogram>);
 
-macro_rules! impl_locking_sample_wrapper {
+macro_rules! impl_interval_sample_wrapper {
     ($sample:ident, $histogram:ty, $snapshot:ident) => {
         impl<'a, 'b: 'a> $sample<'a, 'b> {
-            pub(in crate::concurrent) fn new(sample: LockingSample<'a, 'b, $histogram>) -> Self {
+            pub(in crate::concurrent) fn new(sample: IntervalSampleCore<'a, 'b, $histogram>) -> Self {
                 $sample(sample)
             }
 
+            /// Swap out and return the next sampled interval.
+            ///
+            /// This may wait for writer calls that were already in flight when
+            /// the interval boundary was established.
             pub fn resample(self) -> Self {
                 $sample(self.0.resample())
             }
@@ -66,10 +78,10 @@ macro_rules! impl_locking_sample_wrapper {
     };
 }
 
-impl_locking_sample_wrapper!(FixedLockingSample, FixedConcurrentHistogram, FixedSnapshot);
-impl_locking_sample_wrapper!(ResizableLockingSample, ResizableConcurrentHistogram, ResizableSnapshot);
+impl_interval_sample_wrapper!(FixedIntervalSample, FixedConcurrentHistogram, FixedSnapshot);
+impl_interval_sample_wrapper!(ResizableIntervalSample, ResizableConcurrentHistogram, ResizableSnapshot);
 
-impl<'a, 'b: 'a, T: RecordableHistogram> Drop for LockingSample<'a, 'b, T> {
+impl<'a, 'b: 'a, T: RecordableHistogram> Drop for IntervalSampleCore<'a, 'b, T> {
     fn drop(&mut self) {
         unsafe {
             self.guard.flip();
@@ -78,25 +90,33 @@ impl<'a, 'b: 'a, T: RecordableHistogram> Drop for LockingSample<'a, 'b, T> {
     }
 }
 
-pub struct DoubleLockingSample<'a, 'b: 'a, P: OverflowPolicy> {
-    parent_recorder: &'a DoubleRecorder<P>,
+/// An active sampled interval from a concurrent double recorder.
+///
+/// While this value is alive, it owns the recorder's exclusive sampling lease.
+/// Writers continue recording into the next interval.
+pub struct DoubleIntervalSample<'a, 'b: 'a, P: OverflowPolicy> {
+    parent_recorder: &'a DoubleRecorderWithPolicy<P>,
     histogram: AtomicPtr<ConcurrentDoubleHistogramWithPolicy<P>>,
     guard: PhaseFlipGuard<'b>,
 }
 
-impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
+impl<'a, 'b: 'a, P: OverflowPolicy> DoubleIntervalSample<'a, 'b, P> {
     pub(in crate::concurrent) fn new(
-        parent_recorder: &'a DoubleRecorder<P>,
+        parent_recorder: &'a DoubleRecorderWithPolicy<P>,
         histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
-        DoubleLockingSample {
+        DoubleIntervalSample {
             parent_recorder,
             histogram: AtomicPtr::new(histogram),
             guard,
         }
     }
 
+    /// Swap out and return the next sampled interval.
+    ///
+    /// This may wait for writer calls that were already in flight when the
+    /// interval boundary was established.
     pub fn resample(self) -> Self {
         unsafe {
             let to_swap = self.histogram.load(Ordering::Acquire);
@@ -141,7 +161,7 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleLockingSample<'a, 'b, P> {
     }
 }
 
-impl<'a, 'b: 'a, P: OverflowPolicy> Drop for DoubleLockingSample<'a, 'b, P> {
+impl<'a, 'b: 'a, P: OverflowPolicy> Drop for DoubleIntervalSample<'a, 'b, P> {
     fn drop(&mut self) {
         unsafe {
             self.guard.flip();
@@ -150,25 +170,32 @@ impl<'a, 'b: 'a, P: OverflowPolicy> Drop for DoubleLockingSample<'a, 'b, P> {
     }
 }
 
-pub struct SingleWriterLockingSample<'a, 'b: 'a> {
+/// An active sampled interval from a single-writer recorder.
+///
+/// While this value is alive, it owns the recorder's exclusive sampling lease.
+/// The single writer continues recording into the next interval after the swap.
+pub struct SingleWriterIntervalSample<'a, 'b: 'a> {
     parent_recorder: &'a SingleWriterRecorder,
     histogram: AtomicPtr<Histogram>,
     guard: PhaseFlipGuard<'b>,
 }
 
-impl<'a, 'b: 'a> SingleWriterLockingSample<'a, 'b> {
+impl<'a, 'b: 'a> SingleWriterIntervalSample<'a, 'b> {
     pub(in crate::concurrent) fn new(
         parent_recorder: &'a SingleWriterRecorder,
         histogram: *mut Histogram,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
-        SingleWriterLockingSample {
+        SingleWriterIntervalSample {
             parent_recorder,
             histogram: AtomicPtr::new(histogram),
             guard,
         }
     }
 
+    /// Swap out and return the next sampled interval.
+    ///
+    /// This briefly waits for a writer call that is already in flight.
     pub fn resample(self) -> Self {
         unsafe {
             let to_swap = self.histogram.load(Ordering::Acquire);
@@ -189,7 +216,7 @@ impl<'a, 'b: 'a> SingleWriterLockingSample<'a, 'b> {
     }
 }
 
-impl<'a, 'b: 'a> Drop for SingleWriterLockingSample<'a, 'b> {
+impl<'a, 'b: 'a> Drop for SingleWriterIntervalSample<'a, 'b> {
     fn drop(&mut self) {
         unsafe {
             self.guard.flip();
@@ -198,25 +225,32 @@ impl<'a, 'b: 'a> Drop for SingleWriterLockingSample<'a, 'b> {
     }
 }
 
-pub struct SingleWriterDoubleLockingSample<'a, 'b: 'a, P: OverflowPolicy> {
-    parent_recorder: &'a SingleWriterDoubleRecorder<P>,
+/// An active sampled interval from a single-writer double recorder.
+///
+/// While this value is alive, it owns the recorder's exclusive sampling lease.
+/// The single writer continues recording into the next interval after the swap.
+pub struct SingleWriterDoubleIntervalSample<'a, 'b: 'a, P: OverflowPolicy> {
+    parent_recorder: &'a SingleWriterDoubleRecorderWithPolicy<P>,
     histogram: AtomicPtr<DoubleHistogramWithPolicy<P>>,
     guard: PhaseFlipGuard<'b>,
 }
 
-impl<'a, 'b: 'a, P: OverflowPolicy> SingleWriterDoubleLockingSample<'a, 'b, P> {
+impl<'a, 'b: 'a, P: OverflowPolicy> SingleWriterDoubleIntervalSample<'a, 'b, P> {
     pub(in crate::concurrent) fn new(
-        parent_recorder: &'a SingleWriterDoubleRecorder<P>,
+        parent_recorder: &'a SingleWriterDoubleRecorderWithPolicy<P>,
         histogram: *mut DoubleHistogramWithPolicy<P>,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
-        SingleWriterDoubleLockingSample {
+        SingleWriterDoubleIntervalSample {
             parent_recorder,
             histogram: AtomicPtr::new(histogram),
             guard,
         }
     }
 
+    /// Swap out and return the next sampled interval.
+    ///
+    /// This briefly waits for a writer call that is already in flight.
     pub fn resample(self) -> Self {
         unsafe {
             let to_swap = self.histogram.load(Ordering::Acquire);
@@ -237,7 +271,7 @@ impl<'a, 'b: 'a, P: OverflowPolicy> SingleWriterDoubleLockingSample<'a, 'b, P> {
     }
 }
 
-impl<'a, 'b: 'a, P: OverflowPolicy> Drop for SingleWriterDoubleLockingSample<'a, 'b, P> {
+impl<'a, 'b: 'a, P: OverflowPolicy> Drop for SingleWriterDoubleIntervalSample<'a, 'b, P> {
     fn drop(&mut self) {
         unsafe {
             self.guard.flip();

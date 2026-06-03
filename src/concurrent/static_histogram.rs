@@ -84,10 +84,10 @@ impl FixedConcurrentHistogram {
         FixedConcurrentHistogramBuilder::new()
     }
 
-    pub fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<FixedConcurrentHistogram, CreationError> {
+    pub(crate) fn new(highest_trackable_value: u64, significant_value_digits: u8) -> Result<FixedConcurrentHistogram, CreationError> {
         Self::with_low_high_sigvdig(1, highest_trackable_value, significant_value_digits)
     }
-    pub fn with_low_high_sigvdig(
+    pub(crate) fn with_low_high_sigvdig(
         lowest_discernible_value: u64,
         highest_trackable_value: u64,
         significant_value_digits: u8,
