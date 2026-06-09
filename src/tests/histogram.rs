@@ -1,5 +1,5 @@
 use crate::core::{Counter, RecordError, SubtractionError};
-use crate::st::{Histogram, HistogramWithCounter};
+use crate::st::{FixedInlineHistogram, FixedInlineHistogramWithCounter, Histogram, HistogramWithCounter};
 use crate::tests::consts::*;
 use crate::tests::util::*;
 
@@ -53,6 +53,60 @@ fn typed_builder_supports_smaller_counter_types() {
     succ!(histogram.record_value(100));
     assert_eq!(Some(1), histogram.get_count_at_value(100));
     assert!(!histogram.is_auto_resize());
+}
+
+#[test]
+fn fixed_inline_histogram_records_with_inline_storage() {
+    const INLINE_COUNTS: usize = 4096;
+    let mut inline = FixedInlineHistogram::<INLINE_COUNTS>::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .build()
+        .unwrap();
+    let mut regular = Histogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    assert!(!inline.is_auto_resize());
+    assert!(inline.counts_array_length() as usize <= INLINE_COUNTS);
+    assert!(std::mem::size_of_val(&inline) >= INLINE_COUNTS * std::mem::size_of::<u64>());
+
+    for value in [1, 10, 10, 1_000, 20_000] {
+        succ!(inline.record_value(value));
+        succ!(regular.record_value(value));
+    }
+
+    assert_eq!(regular.get_total_count(), inline.get_total_count());
+    assert_eq!(regular.get_count_at_value(10), inline.get_count_at_value(10));
+    assert_eq!(regular.get_max_value(), inline.get_max_value());
+    assert_eq!(regular.get_min_value(), inline.get_min_value());
+    assert_eq!(regular.get_value_at_percentile(75.0), inline.get_value_at_percentile(75.0));
+}
+
+#[test]
+fn fixed_inline_histogram_rejects_too_small_capacity() {
+    let result = FixedInlineHistogram::<16>::builder()
+        .significant_digits(3)
+        .highest_trackable_value(20_000)
+        .build();
+
+    assert!(matches!(result, Err(crate::core::CreationError::RequiresExcessiveArrayLen)));
+}
+
+#[test]
+fn fixed_inline_histogram_supports_smaller_counter_types() {
+    let mut histogram = FixedInlineHistogramWithCounter::<u32, 4096>::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .build()
+        .unwrap();
+
+    succ!(histogram.record_value_with_count(100, 3));
+    assert_eq!(Some(3), histogram.get_count_at_value(100));
+    assert_eq!(3, histogram.get_total_count());
 }
 
 #[test]

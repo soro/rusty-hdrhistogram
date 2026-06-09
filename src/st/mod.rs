@@ -8,7 +8,9 @@
 pub(crate) mod backing_array;
 mod double_histogram;
 mod histogram;
+mod inline_histogram;
 
 pub use self::double_histogram::{DoubleHistogram, DoubleHistogramBuilder, DoubleHistogramWithPolicy, SaturatingDoubleHistogram};
 pub use self::histogram::{Histogram, HistogramBuilder, HistogramWithCounter};
+pub use self::inline_histogram::{FixedInlineHistogram, FixedInlineHistogramBuilder, FixedInlineHistogramWithCounter};
 pub use crate::core::{Counter, OverflowPolicy, SaturateOnOverflow, ThrowOnOverflow};
