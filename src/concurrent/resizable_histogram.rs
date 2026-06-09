@@ -986,10 +986,11 @@ impl ResizableConcurrentHistogram {
         self.auto_resize.store(resize, Ordering::Relaxed);
     }
 
-    pub(crate) unsafe fn clear_counts(&self) {
-        let mut mutation = self.begin_structural_mutation();
-        mutation.flip();
-        mutation.clear_counts();
+    pub(crate) fn clear_counts_for_reuse(&mut self) {
+        unsafe {
+            self.clear_counts_locked();
+        }
+        self.meta_data.clear();
     }
 
     unsafe fn clear_counts_locked(&self) {
@@ -1005,8 +1006,6 @@ impl ResizableConcurrentHistogram {
         self.raw_max_value
             .store(ORIGINAL_MAX | self.layout.unit_magnitude_mask, Ordering::Relaxed);
         self.raw_min_non_zero_value.store(ORIGINAL_MIN, Ordering::Relaxed);
-        let meta_data = &self.meta_data as *const HistogramMetaData as *mut HistogramMetaData;
-        (*meta_data).clear();
     }
 
     fn equals(&self, other: &Self) -> bool {
@@ -1243,18 +1242,20 @@ impl ConstructableHistogram for ResizableConcurrentHistogram {
 
 impl RecordableHistogram for ResizableConcurrentHistogram {
     fn fresh(settings: &HistogramSettings) -> Result<ResizableConcurrentHistogram, CreationError> {
-        let lowest_discernable = settings.lowest_discernible_value;
-        let highest_trackable = settings.highest_trackable_value;
-        let sigvdig = settings.number_of_significant_value_digits as u8;
-        ResizableConcurrentHistogram::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
+        ResizableConcurrentHistogram::builder()
+            .lowest_discernible_value(settings.lowest_discernible_value)
+            .highest_trackable_value(settings.highest_trackable_value)
+            .significant_digits(settings.number_of_significant_value_digits as u8)
+            .auto_resize(settings.auto_resize)
+            .build()
     }
     #[inline(always)]
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData {
         &mut self.meta_data
     }
     #[inline(always)]
-    unsafe fn clear_counts(&self) {
-        ResizableConcurrentHistogram::clear_counts(self);
+    fn clear_counts_for_reuse(&mut self) {
+        ResizableConcurrentHistogram::clear_counts_for_reuse(self);
     }
     fn equals(&self, other: &Self) -> bool {
         ResizableConcurrentHistogram::equals(self, other)

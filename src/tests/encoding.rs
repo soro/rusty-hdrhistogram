@@ -308,6 +308,28 @@ fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
 
 #[cfg(feature = "encoding-base64")]
 #[test]
+fn double_histogram_log_line_roundtrip_preserves_metadata_and_counts() {
+    let mut histogram = DoubleHistogram::new(3).unwrap();
+    histogram.record_value_with_count(1.5, 2).unwrap();
+    histogram.meta_data_mut().set_tag_string("phase-a".to_string());
+
+    let line = encode_double_histogram_log_line_with_max_value_unit_ratio(&histogram, 40.0, 41.5, 1.0).unwrap();
+    match decode_histogram_log_line(&line).unwrap() {
+        Some(HistogramLogRecord::Interval(entry)) => {
+            assert_eq!(Some("phase-a".to_string()), entry.tag);
+            assert_eq!(40.0, entry.start_timestamp_sec);
+            assert_eq!(1.5, entry.interval_length_sec);
+            match entry.histogram {
+                DecodedHistogram::Double(decoded) => assert_eq!(histogram.get_total_count(), decoded.get_total_count()),
+                DecodedHistogram::Integer(_) => panic!("decoded double histogram log line as integer"),
+            }
+        }
+        _ => panic!("did not decode interval log line"),
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
 fn histogram_log_report_filters_by_tag() {
     let mut untagged = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     untagged.record_value(100).unwrap();
@@ -513,11 +535,15 @@ fn histogram_log_report_rejects_invalid_config() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
-    let recorder = DoubleRecorder::builder()
+    use crate::concurrent::ConcurrentDoubleHistogram;
+
+    let mut histogram = ConcurrentDoubleHistogram::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
         .unwrap();
+    histogram.meta_data_mut().set_tag_string("phase-a".to_string());
+    let recorder = DoubleRecorder::from_histogram(histogram);
     recorder.record_value_with_count(1.5, 2).unwrap();
     recorder.record_value(12.0).unwrap();
 
@@ -529,6 +555,7 @@ fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
     match record {
         HistogramLogRecord::Interval(entry) => match entry.histogram {
             DecodedHistogram::Double(decoded) => {
+                assert_eq!(Some("phase-a".to_string()), entry.tag);
                 assert_eq!(snapshot.get_total_count(), decoded.get_total_count());
                 assert_eq!(snapshot.get_count_at_value(1.5), decoded.get_count_at_value(1.5));
                 assert_eq!(snapshot.get_count_at_value(12.0), decoded.get_count_at_value(12.0));

@@ -841,6 +841,27 @@ fn auto_sizing_edges() {
     run_auto_sizing_edges_test::<ConcurrentDoubleHistogram>();
 }
 
+fn run_high_side_range_shift_preserves_existing_counts_test<H: TestDoubleHistogram>() {
+    let mut histogram = H::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let original_lowest = histogram.get_current_lowest_trackable_non_zero_value();
+    let original_highest = histogram.get_current_highest_trackable_value();
+    let existing_value = original_lowest * 2.0;
+    let high_value = original_highest * 1.5;
+
+    succ!(histogram.record_value(existing_value));
+    succ!(histogram.record_value(high_value));
+
+    assert_eq!(2, histogram.get_total_count());
+    assert_eq!(1, histogram.get_count_at_value(existing_value));
+    assert_eq!(1, histogram.get_count_at_value(high_value));
+}
+
+#[test]
+fn high_side_range_shift_preserves_existing_counts() {
+    run_high_side_range_shift_preserves_existing_counts_test::<DoubleHistogram>();
+    run_high_side_range_shift_preserves_existing_counts_test::<ConcurrentDoubleHistogram>();
+}
+
 macro_rules! assert_double_iterator_surface {
     (@check $histogram:ident) => {{
         succ!($histogram.record_value_with_count(1.5, 2));

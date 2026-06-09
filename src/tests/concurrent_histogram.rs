@@ -1,6 +1,8 @@
 use crate::concurrent::{
     ConcurrentDoubleHistogram, FixedConcurrentHistogram, ResizableConcurrentHistogram, SaturatingConcurrentDoubleHistogram,
 };
+use crate::core::constants::ORIGINAL_MIN;
+use crate::core::readable_histogram::ReadableHistogram;
 use crate::core::RecordError;
 use crate::iteration::IterationError;
 use parking_lot::RwLock;
@@ -132,6 +134,16 @@ fn saturating_concurrent_double_clamps_after_failed_range_shift() {
 }
 
 #[test]
+fn saturating_concurrent_double_clamps_counted_out_of_range_values() {
+    let histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+
+    succ!(histogram.record_value_with_count(f64::MAX, 3));
+
+    assert_eq!(3, histogram.get_total_count());
+    assert!(histogram.get_max_value() < f64::MAX);
+}
+
+#[test]
 fn concurrent_double_range_shift_publication_under_writers() {
     const THREADS: usize = 4;
     const ITERATIONS: usize = 2_000;
@@ -205,18 +217,80 @@ fn concurrent_double_try_get_mean_reports_concurrent_modification() {
 
 #[test]
 fn concurrent_clear_counts_resets_normalizing_offset() {
-    let histogram = ResizableConcurrentHistogram::with_low_high_sigvdig(1, 1024, 2).unwrap();
+    let mut histogram = ResizableConcurrentHistogram::with_low_high_sigvdig(1, 1024, 2).unwrap();
+
+    succ!(histogram.record_value(4));
+    succ!(histogram.shift_values_left(1));
+    succ!(histogram.resize(1_000_000));
+    succ!(histogram.record_value(500_000));
+    assert_ne!(0, histogram.normalizing_index_offset());
+    assert_eq!(2, histogram.get_total_count());
+
+    histogram.clear_counts_for_reuse();
+    assert_eq!(0, histogram.normalizing_index_offset());
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(ORIGINAL_MIN, histogram.get_min_non_zero_value());
+    assert_eq!(0, histogram.get_max_value());
+
+    succ!(histogram.record_value(4));
+    let index = histogram.settings().counts_array_index(4);
+    assert_eq!(Some(1), histogram.get_count_at_index(index));
+}
+
+#[test]
+fn fixed_clear_counts_for_reuse_resets_tracking() {
+    let mut histogram = FixedConcurrentHistogram::with_low_high_sigvdig(1, 1024, 2).unwrap();
 
     succ!(histogram.record_value(4));
     succ!(histogram.shift_values_left(1));
     assert_ne!(0, histogram.normalizing_index_offset());
 
-    unsafe { histogram.clear_counts() };
+    histogram.clear_counts_for_reuse();
     assert_eq!(0, histogram.normalizing_index_offset());
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(ORIGINAL_MIN, histogram.get_min_non_zero_value());
+    assert_eq!(0, histogram.get_max_value());
 
     succ!(histogram.record_value(4));
     let index = histogram.settings().counts_array_index(4);
     assert_eq!(Some(1), histogram.get_count_at_index(index));
+}
+
+#[test]
+fn concurrent_double_reset_clears_metadata() {
+    let mut histogram = ConcurrentDoubleHistogram::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+
+    histogram.meta_data_mut().set_tag_string("phase-a".to_string());
+    histogram.meta_data_mut().set_start_now();
+    histogram.meta_data_mut().set_end_now();
+    succ!(histogram.record_value(2.0_f64.powi(800)));
+
+    histogram.reset();
+
+    assert_eq!(0, histogram.get_total_count());
+    let meta_data = histogram.meta_data();
+    assert!(meta_data.tag.is_none());
+    assert!(meta_data.start_timestamp.is_none());
+    assert!(meta_data.end_timestamp.is_none());
+}
+
+#[test]
+fn concurrent_double_read_view_settings_preserve_auto_resize_flag() {
+    let histogram = ConcurrentDoubleHistogram::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    let read_view = histogram.read_view();
+
+    assert!(!read_view.is_auto_resize());
+    assert!(!read_view.settings().auto_resize);
 }
 
 #[test]

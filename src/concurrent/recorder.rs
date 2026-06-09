@@ -137,12 +137,12 @@ impl FixedRecorderBuilder {
     }
 
     pub fn build(self) -> Result<FixedRecorder, CreationError> {
-        FixedConcurrentHistogram::with_low_high_sigvdig(
-            self.lowest_discernible_value,
-            self.highest_trackable_value,
-            self.significant_value_digits,
-        )
-        .map(FixedRecorder::from_histogram)
+        FixedConcurrentHistogram::builder()
+            .lowest_discernible_value(self.lowest_discernible_value)
+            .highest_trackable_value(self.highest_trackable_value)
+            .significant_digits(self.significant_value_digits)
+            .build()
+            .map(FixedRecorder::from_histogram)
     }
 }
 
@@ -185,12 +185,12 @@ impl ResizableRecorderBuilder {
     }
 
     pub fn build(self) -> Result<ResizableRecorder, CreationError> {
-        let histogram = ResizableConcurrentHistogram::with_low_high_sigvdig(
-            self.lowest_discernible_value,
-            self.highest_trackable_value,
-            self.significant_value_digits,
-        )?;
-        histogram.set_auto_resize(self.auto_resize);
+        let histogram = ResizableConcurrentHistogram::builder()
+            .lowest_discernible_value(self.lowest_discernible_value)
+            .highest_trackable_value(self.highest_trackable_value)
+            .significant_digits(self.significant_value_digits)
+            .auto_resize(self.auto_resize)
+            .build()?;
         Ok(ResizableRecorder::from_histogram(histogram))
     }
 }
@@ -234,12 +234,12 @@ impl SingleWriterRecorderBuilder {
     }
 
     pub fn build(self) -> Result<SingleWriterRecorder, CreationError> {
-        let mut histogram = Histogram::with_low_high_sigvdig(
-            self.lowest_discernible_value,
-            self.highest_trackable_value,
-            self.significant_value_digits,
-        )?;
-        histogram.set_auto_resize(self.auto_resize);
+        let histogram = Histogram::builder()
+            .lowest_discernible_value(self.lowest_discernible_value)
+            .highest_trackable_value(self.highest_trackable_value)
+            .significant_digits(self.significant_value_digits)
+            .auto_resize(self.auto_resize)
+            .build()?;
         Ok(SingleWriterRecorder::from_histogram(histogram))
     }
 }
@@ -274,11 +274,11 @@ impl<P: OverflowPolicy> DoubleRecorderBuilder<P> {
     }
 
     pub fn build(self) -> Result<DoubleRecorderWithPolicy<P>, DoubleCreationError> {
-        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
-            self.highest_to_lowest_value_ratio,
-            self.number_of_significant_value_digits,
-        )?;
-        histogram.set_auto_resize(self.auto_resize);
+        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
+            .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
+            .significant_digits(self.number_of_significant_value_digits)
+            .auto_resize(self.auto_resize)
+            .build()?;
         Ok(DoubleRecorderWithPolicy::from_histogram(histogram))
     }
 }
@@ -313,11 +313,11 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorderBuilder<P> {
     }
 
     pub fn build(self) -> Result<SingleWriterDoubleRecorderWithPolicy<P>, DoubleCreationError> {
-        let mut histogram = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
-            self.highest_to_lowest_value_ratio,
-            self.number_of_significant_value_digits,
-        )?;
-        histogram.set_auto_resize(self.auto_resize);
+        let histogram = DoubleHistogramWithPolicy::<P>::builder()
+            .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
+            .significant_digits(self.number_of_significant_value_digits)
+            .auto_resize(self.auto_resize)
+            .build()?;
         Ok(SingleWriterDoubleRecorderWithPolicy::from_histogram(histogram))
     }
 }
@@ -661,12 +661,12 @@ impl SingleWriterRecorder {
     }
 
     fn fresh_histogram_for_inactive(&self) -> Result<Histogram, CreationError> {
-        let mut fresh = Histogram::with_low_high_sigvdig(
-            self.inactive_settings.lowest_discernible_value,
-            self.inactive_settings.highest_trackable_value,
-            self.inactive_settings.number_of_significant_value_digits as u8,
-        )?;
-        fresh.set_auto_resize(self.inactive_settings.auto_resize);
+        let mut fresh = Histogram::builder()
+            .lowest_discernible_value(self.inactive_settings.lowest_discernible_value)
+            .highest_trackable_value(self.inactive_settings.highest_trackable_value)
+            .significant_digits(self.inactive_settings.number_of_significant_value_digits as u8)
+            .auto_resize(self.inactive_settings.auto_resize)
+            .build()?;
         fresh.set_integer_to_double_value_conversion_ratio(self.inactive_integer_to_double_value_conversion_ratio);
         Ok(fresh)
     }
@@ -755,12 +755,12 @@ impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
     pub fn begin_interval_sample<'a>(&'a self) -> DoubleIntervalSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let active = unsafe { &*self.core.active() };
-        let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
-            active.get_highest_to_lowest_value_ratio(),
-            active.get_number_of_significant_value_digits(),
-        )
-        .expect("active double recorder histogram settings must be reusable");
-        fresh_histogram.set_auto_resize(active.is_auto_resize());
+        let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
+            .highest_to_lowest_value_ratio(active.get_highest_to_lowest_value_ratio())
+            .significant_digits(active.get_number_of_significant_value_digits())
+            .auto_resize(active.is_auto_resize())
+            .build()
+            .expect("active double recorder histogram settings must be reusable");
         let sample = self.perform_interval_sample(Box::into_raw(Box::new(fresh_histogram)), &pfg);
         DoubleIntervalSample::new(self, sample, pfg)
     }
@@ -857,12 +857,11 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorderWithPolicy<P> {
     }
 
     fn fresh_histogram_for_inactive(&self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {
-        let mut fresh = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
-            self.inactive_highest_to_lowest_value_ratio,
-            self.inactive_number_of_significant_value_digits,
-        )?;
-        fresh.set_auto_resize(self.inactive_auto_resize);
-        Ok(fresh)
+        DoubleHistogramWithPolicy::<P>::builder()
+            .highest_to_lowest_value_ratio(self.inactive_highest_to_lowest_value_ratio)
+            .significant_digits(self.inactive_number_of_significant_value_digits)
+            .auto_resize(self.inactive_auto_resize)
+            .build()
     }
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(

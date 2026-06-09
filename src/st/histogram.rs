@@ -363,6 +363,7 @@ impl<T: Counter> HistogramWithCounter<T> {
 
     fn add_to_count_at_index(&mut self, idx: u32, count: T) {
         let normalized_index = self.normalize_index(idx);
+        // Java-compatible unchecked count arithmetic; callers must stay within the counter capacity.
         *self.counts.get_unchecked_mut(normalized_index) += count;
     }
 
@@ -698,6 +699,8 @@ impl<T: Counter> HistogramWithCounter<T> {
             return Err(SubtractionError::ValueOutOfRange);
         }
 
+        // This mirrors the Java implementation's fused validation/subtraction
+        // path: a later count error can leave earlier buckets subtracted.
         for i in 0..other_histogram.counts_array_length() {
             let other_count = *other_histogram.unsafe_get_count_at_index(i);
             if other_count != T::zero() {

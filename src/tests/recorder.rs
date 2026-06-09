@@ -1,7 +1,7 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::{
-    DoubleRecorder, FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder, SaturatingSingleWriterDoubleRecorder,
-    SingleWriterDoubleRecorder, SingleWriterRecorder,
+    DoubleRecorder, FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder, SaturatingDoubleRecorder,
+    SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder, SingleWriterRecorder,
 };
 use crate::core::constants::ORIGINAL_MIN;
 use crate::core::*;
@@ -350,6 +350,21 @@ fn saturating_single_writer_double_recorder_clamps_out_of_range_values() {
 }
 
 #[test]
+fn saturating_double_recorder_clamps_counted_out_of_range_values() {
+    let recorder = SaturatingDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+
+    succ!(recorder.record_value_with_count(f64::MAX, 3));
+    let sample = recorder.begin_interval_sample();
+
+    assert_eq!(3, sample.snapshot().get_total_count());
+    assert!(sample.snapshot().get_max_value() < f64::MAX);
+}
+
+#[test]
 fn recorder_resample_resets_tracking() {
     let recorder = ResizableRecorder::builder()
         .lowest_discernible_value(1)
@@ -380,6 +395,99 @@ fn recorder_resample_resets_tracking() {
         let expected_max = snapshot.settings().highest_equivalent_value(500);
         assert_eq!(snapshot.get_max_value(), expected_max);
     }
+}
+
+#[test]
+fn resizable_recorder_preserves_auto_resize_disabled_across_samples() {
+    let recorder = ResizableRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(2)
+        .significant_digits(2)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    let sample = recorder.begin_interval_sample();
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    let sample = sample.resample();
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    drop(sample);
+}
+
+#[test]
+fn single_writer_recorder_preserves_auto_resize_disabled_across_samples() {
+    let recorder = SingleWriterRecorder::builder()
+        .lowest_discernible_value(1)
+        .highest_trackable_value(2)
+        .significant_digits(2)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    succ!(recorder.record_value(1));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    let sample = recorder.begin_interval_sample();
+    succ!(recorder.record_value(1));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    let sample = sample.resample();
+    succ!(recorder.record_value(1));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1_000));
+
+    drop(sample);
+}
+
+#[test]
+fn double_recorder_preserves_auto_resize_disabled_across_samples() {
+    let recorder = DoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+    let in_range = 2.0_f64.powi(800);
+
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    let sample = recorder.begin_interval_sample();
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    let sample = sample.resample();
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    drop(sample);
+}
+
+#[test]
+fn single_writer_double_recorder_preserves_auto_resize_disabled_across_samples() {
+    let recorder = SingleWriterDoubleRecorder::builder()
+        .highest_to_lowest_value_ratio(1024)
+        .significant_digits(2)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+    let in_range = 2.0_f64.powi(800);
+
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    let sample = recorder.begin_interval_sample();
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    let sample = sample.resample();
+    succ!(recorder.record_value(in_range));
+    assert_eq!(Err(RecordError::ValueOutOfRangeResizeDisabled), recorder.record_value(1.0));
+
+    drop(sample);
 }
 
 #[test]
@@ -436,7 +544,7 @@ fn clear_counts_resets_metadata() {
     histogram.meta_data_mut().set_end_now();
     succ!(histogram.record_value(123));
 
-    unsafe { histogram.clear_counts() };
+    histogram.clear_counts_for_reuse();
 
     assert_eq!(histogram.get_total_count(), 0);
     assert_eq!(histogram.get_min_non_zero_value(), ORIGINAL_MIN);

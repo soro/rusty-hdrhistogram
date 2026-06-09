@@ -31,7 +31,9 @@ impl<'a, 'b: 'a, T: RecordableHistogram> IntervalSampleCore<'a, 'b, T> {
     pub(crate) fn resample(self) -> Self {
         unsafe {
             let to_swap = self.histogram.load(Ordering::Acquire);
-            (*to_swap).clear_counts();
+            // SAFETY: this sample owns the sampled-out histogram, and consuming
+            // `self` prevents safe snapshot/read borrows from surviving resample.
+            (*to_swap).clear_counts_for_reuse();
             let res = self.parent_recorder.perform_interval_sample(to_swap, &self.guard);
             self.histogram.store(res, Ordering::Release);
             self

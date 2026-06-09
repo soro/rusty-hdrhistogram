@@ -640,8 +640,8 @@ impl<P: OverflowPolicy> DoubleHistogramWithPolicy<P> {
             if self.integer_histogram.get_total_count() > *self.integer_histogram.unsafe_get_count_at_index(0) {
                 match self.integer_histogram.shift_values_right(number_of_binary_orders_of_magnitude) {
                     Ok(()) => {
-                        new_lowest *= shift_multiplier;
-                        new_highest *= shift_multiplier;
+                        // Java currently scales here as well, but that double-scales
+                        // the published range and loses the old double-value mapping.
                     }
                     Err(_) => {
                         self.handle_shift_values_exception(number_of_binary_orders_of_magnitude)?;

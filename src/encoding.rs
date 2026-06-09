@@ -1224,7 +1224,7 @@ pub fn encode_double_histogram_log_line_with_max_value_unit_ratio<P: OverflowPol
     let compressed = encode_double_histogram_compressed_with_level(histogram, 9)?;
     let payload = BASE64_STANDARD.encode(compressed);
     encode_log_line(
-        None,
+        histogram.integer_histogram().meta_data.tag.as_deref(),
         start_timestamp_sec,
         end_timestamp_sec,
         histogram.get_max_value() / checked_max_value_unit_ratio(max_value_unit_ratio)?,
@@ -1256,7 +1256,7 @@ pub fn encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
     let compressed = encode_concurrent_double_read_view_compressed_with_level(histogram, 9)?;
     let payload = BASE64_STANDARD.encode(compressed);
     encode_log_line(
-        None,
+        histogram.meta_data().tag.as_deref(),
         start_timestamp_sec,
         end_timestamp_sec,
         histogram.get_max_value() / checked_max_value_unit_ratio(max_value_unit_ratio)?,

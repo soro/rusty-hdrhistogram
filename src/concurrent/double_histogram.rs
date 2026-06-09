@@ -418,7 +418,9 @@ impl crate::core::readable_histogram::sealed::Sealed for ConcurrentDoubleReadVie
 
 impl ReadableHistogram for ConcurrentDoubleReadView<'_> {
     fn settings(&self) -> HistogramSettings {
-        self.integer_view.settings()
+        let mut settings = self.integer_view.settings();
+        settings.auto_resize = self.auto_resize;
+        settings
     }
 
     fn array_length(&self) -> u32 {
@@ -627,8 +629,9 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
         self.auto_resize.load(Ordering::Relaxed)
     }
 
-    pub fn reset(&self) {
+    pub fn reset(&mut self) {
         let _range_guard = self.range_lock.lock();
+        self.integer_histogram.meta_data_mut().clear();
         let mut mutation = self.integer_histogram.begin_structural_mutation();
         let _gate = self.close_range_shift_gate();
         mutation.flip();
@@ -1046,8 +1049,8 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
                     new_integer_to_double_value_conversion_ratio,
                 ) {
                     Ok(()) => {
-                        new_lowest *= shift_multiplier;
-                        new_highest *= shift_multiplier;
+                        // Java currently scales here as well, but that double-scales
+                        // the published range and loses the old double-value mapping.
                     }
                     Err(_) => {
                         self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;

@@ -122,9 +122,32 @@ The double recorder uses `ConcurrentDoubleHistogram` and the same
 `ConcurrentDoubleSnapshot`, so sampled interval data can be queried, iterated,
 and encoded without exposing recording or reset methods.
 
+Direct concurrent histogram types live under `hdrhistogram::concurrent`:
+
+```rust
+use hdrhistogram::concurrent::ConcurrentDoubleHistogram;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let histogram = ConcurrentDoubleHistogram::builder()
+        .significant_digits(3)
+        .highest_to_lowest_value_ratio(1_024)
+        .build()?;
+
+    histogram.record_value(42.0)?;
+    assert_eq!(histogram.get_total_count(), 1);
+
+    Ok(())
+}
+```
+
 Only one interval sample may be active for a recorder at a time. Holding an
 interval sample does not stop writers from recording into the next interval;
 resampling may wait for writer calls that were already in flight.
+
+Direct concurrent histograms are intended for shared recording and short-lived
+captured read views. Reset-style maintenance is an exclusive operation;
+`ConcurrentDoubleHistogram::reset` requires `&mut self`. Use recorders for
+reset-after-scrape or interval-sampling workflows.
 
 ## Usage Notes
 

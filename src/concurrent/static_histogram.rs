@@ -323,18 +323,18 @@ impl FixedConcurrentHistogram {
             .get_min_non_zero_value(self.raw_min_non_zero_value.load(Ordering::Relaxed))
     }
 
-    pub(crate) unsafe fn clear_counts(&self) {
-        let counts = self.counts.load(Ordering::Relaxed);
-        for i in 0..self.counts_array_length() {
-            (*counts).get_unchecked(i).store(0, Ordering::Relaxed);
+    pub(crate) fn clear_counts_for_reuse(&mut self) {
+        let counts = *self.counts.get_mut();
+        let counts_len = unsafe { (*counts).length() };
+        for i in 0..counts_len {
+            unsafe { (*counts).get_unchecked(i) }.store(0, Ordering::Relaxed);
         }
-        (*counts).set_normalizing_index_offset(0);
+        unsafe { (*counts).set_normalizing_index_offset(0) };
         self.total_count.store(0, Ordering::Relaxed);
         self.raw_max_value
             .store(ORIGINAL_MAX | self.layout.unit_magnitude_mask, Ordering::Relaxed);
         self.raw_min_non_zero_value.store(ORIGINAL_MIN, Ordering::Relaxed);
-        let meta_data = &self.meta_data as *const HistogramMetaData as *mut HistogramMetaData;
-        (*meta_data).clear();
+        self.meta_data.clear();
     }
 
     unsafe fn copy_counts(&self, source: &InlineBackingArray<AtomicU64>, target: &mut InlineBackingArray<AtomicU64>) {
@@ -423,18 +423,19 @@ impl ConstructableHistogram for FixedConcurrentHistogram {
 
 impl RecordableHistogram for FixedConcurrentHistogram {
     fn fresh(settings: &HistogramSettings) -> Result<FixedConcurrentHistogram, CreationError> {
-        let lowest_discernable = settings.lowest_discernible_value;
-        let highest_trackable = settings.highest_trackable_value;
-        let sigvdig = settings.number_of_significant_value_digits as u8;
-        FixedConcurrentHistogram::with_low_high_sigvdig(lowest_discernable, highest_trackable, sigvdig)
+        FixedConcurrentHistogram::builder()
+            .lowest_discernible_value(settings.lowest_discernible_value)
+            .highest_trackable_value(settings.highest_trackable_value)
+            .significant_digits(settings.number_of_significant_value_digits as u8)
+            .build()
     }
     #[inline(always)]
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData {
         &mut self.meta_data
     }
     #[inline(always)]
-    unsafe fn clear_counts(&self) {
-        FixedConcurrentHistogram::clear_counts(self);
+    fn clear_counts_for_reuse(&mut self) {
+        FixedConcurrentHistogram::clear_counts_for_reuse(self);
     }
     fn equals(&self, other: &Self) -> bool {
         FixedConcurrentHistogram::equals(self, other)
