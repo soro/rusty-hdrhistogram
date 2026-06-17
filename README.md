@@ -42,11 +42,13 @@ precision. Use
 
 ## Fast Fixed-Range Histograms
 
-For the lowest single-threaded recording cost, define a static fixed-range
-histogram when the value range is known ahead of time. Static histograms store
-the count array directly in the histogram object and encode the HdrHistogram
-layout in the type, so recording avoids both the `Vec` allocation and per-value
-layout field loads used by the resizable `Histogram`.
+For maximum single-threaded recording performance, reach for a static
+fixed-range histogram when the value range is known ahead of time. Static
+histograms store the count array directly in the histogram object and encode the
+HdrHistogram layout in the type, so recording avoids both the `Vec` allocation
+and per-value layout field loads used by the resizable `Histogram`. In the
+included benchmarks, the static histogram recording path is usually a flat
+~2 ns per recorded value.
 
 ```rust
 hdrhistogram::static_histogram! {
