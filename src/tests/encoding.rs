@@ -5,6 +5,14 @@ use crate::st::{DoubleHistogram, Histogram};
 #[cfg(feature = "encoding-base64")]
 use std::io::Cursor;
 
+crate::static_histogram! {
+    type EncodingStaticHistogram = {
+        lowest_discernible_value: 1,
+        highest_trackable_value: 3_600_000_000,
+        significant_digits: 3,
+    };
+}
+
 #[test]
 fn histogram_settings_estimate_v2_encoding_capacity() {
     let settings = HistogramSettings::new(1, 1_024, 2).unwrap();
@@ -33,6 +41,31 @@ fn histogram_v2_roundtrip_preserves_counts() {
 
     let decoded = decode_histogram_v2(&encoded).unwrap();
     assert!(histogram.equals(&decoded));
+    assert_eq!(histogram.get_total_count(), decoded.get_total_count());
+    assert_eq!(histogram.get_max_value(), decoded.get_max_value());
+    assert_eq!(histogram.get_count_at_value(0), decoded.get_count_at_value(0));
+    assert_eq!(histogram.get_count_at_value(10_000), decoded.get_count_at_value(10_000));
+    assert_eq!(histogram.get_count_at_value(123_456_789), decoded.get_count_at_value(123_456_789));
+}
+
+#[test]
+fn static_histogram_v2_roundtrip_preserves_counts() {
+    let mut histogram = EncodingStaticHistogram::new();
+    histogram.record_value_with_count(0, 3).unwrap();
+    histogram.record_value(1).unwrap();
+    histogram.record_value_with_count(10_000, 2).unwrap();
+    histogram.record_value_with_count(123_456_789, 4).unwrap();
+
+    let encoded = encode_histogram_v2(&histogram).unwrap();
+    assert_eq!(&encoded[..4], &V2_ENCODING_COOKIE.to_be_bytes());
+
+    let decoded = decode_histogram_v2(&encoded).unwrap();
+    assert_eq!(histogram.counts_array_length(), decoded.counts_array_length());
+    assert_eq!(histogram.get_highest_trackable_value(), decoded.get_highest_trackable_value());
+    assert_eq!(
+        histogram.get_number_of_significant_value_digits(),
+        decoded.get_number_of_significant_value_digits()
+    );
     assert_eq!(histogram.get_total_count(), decoded.get_total_count());
     assert_eq!(histogram.get_max_value(), decoded.get_max_value());
     assert_eq!(histogram.get_count_at_value(0), decoded.get_count_at_value(0));

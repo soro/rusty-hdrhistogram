@@ -1,7 +1,17 @@
 use crate::core::{Counter, RecordError, SubtractionError};
-use crate::st::{FixedInlineHistogram, FixedInlineHistogramWithCounter, Histogram, HistogramWithCounter};
+use crate::st::{static_histogram_counts_array_length, Histogram, HistogramWithCounter, StaticHistogramWithCounter};
 use crate::tests::consts::*;
 use crate::tests::util::*;
+
+crate::static_histogram! {
+    type TestStaticHistogram = {
+        lowest_discernible_value: 1,
+        highest_trackable_value: 20_000,
+        significant_digits: 2,
+    };
+}
+
+type TestStaticHistogramU32 = StaticHistogramWithCounter<u32, 1, 20_000, 2, { static_histogram_counts_array_length(1, 20_000, 2) }>;
 
 fn verify_max_value<T: Counter>(histogram: HistogramWithCounter<T>) {
     let mut computed_max_value = 0;
@@ -56,13 +66,8 @@ fn typed_builder_supports_smaller_counter_types() {
 }
 
 #[test]
-fn fixed_inline_histogram_records_with_inline_storage() {
-    const INLINE_COUNTS: usize = 4096;
-    let mut inline = FixedInlineHistogram::<INLINE_COUNTS>::builder()
-        .significant_digits(2)
-        .highest_trackable_value(20_000)
-        .build()
-        .unwrap();
+fn static_histogram_macro_precomputes_layout_and_records() {
+    let mut static_histogram = TestStaticHistogram::new();
     let mut regular = Histogram::builder()
         .significant_digits(2)
         .highest_trackable_value(20_000)
@@ -70,43 +75,163 @@ fn fixed_inline_histogram_records_with_inline_storage() {
         .build()
         .unwrap();
 
-    assert!(!inline.is_auto_resize());
-    assert!(inline.counts_array_length() as usize <= INLINE_COUNTS);
-    assert!(std::mem::size_of_val(&inline) >= INLINE_COUNTS * std::mem::size_of::<u64>());
+    assert_eq!(
+        static_histogram_counts_array_length(1, 20_000, 2),
+        static_histogram.counts_array_length() as usize
+    );
+    assert_eq!(regular.settings(), static_histogram.settings());
 
     for value in [1, 10, 10, 1_000, 20_000] {
-        succ!(inline.record_value(value));
+        succ!(static_histogram.record_value(value));
         succ!(regular.record_value(value));
     }
 
-    assert_eq!(regular.get_total_count(), inline.get_total_count());
-    assert_eq!(regular.get_count_at_value(10), inline.get_count_at_value(10));
-    assert_eq!(regular.get_max_value(), inline.get_max_value());
-    assert_eq!(regular.get_min_value(), inline.get_min_value());
-    assert_eq!(regular.get_value_at_percentile(75.0), inline.get_value_at_percentile(75.0));
+    assert_eq!(regular.get_total_count(), static_histogram.get_total_count());
+    assert_eq!(regular.get_count_at_value(10), static_histogram.get_count_at_value(10));
+    assert_eq!(regular.get_max_value(), static_histogram.get_max_value());
+    assert_eq!(regular.get_min_value(), static_histogram.get_min_value());
+    assert_eq!(
+        regular.get_value_at_percentile(75.0),
+        static_histogram.get_value_at_percentile(75.0)
+    );
+    assert_eq!(
+        regular.get_percentile_at_or_below_value(1_000),
+        static_histogram.get_percentile_at_or_below_value(1_000)
+    );
+    assert_eq!(
+        regular.lowest_equivalent_value(1_001),
+        static_histogram.lowest_equivalent_value(1_001)
+    );
+    assert_eq!(
+        regular.highest_equivalent_value(1_001),
+        static_histogram.highest_equivalent_value(1_001)
+    );
+    assert_eq!(
+        regular.median_equivalent_value(1_001),
+        static_histogram.median_equivalent_value(1_001)
+    );
+    assert_eq!(
+        regular.next_non_equivalent_value(1_001),
+        static_histogram.next_non_equivalent_value(1_001)
+    );
+    assert_eq!(
+        regular.size_of_equivalent_value_range(1_001),
+        static_histogram.size_of_equivalent_value_range(1_001)
+    );
+    assert_eq!(regular.value_from_index(5), static_histogram.value_from_index(5));
+    assert_eq!(regular.counts_array_index(1_001), static_histogram.counts_array_index(1_001));
+    assert!(!static_histogram.is_auto_resize());
+    assert!(!static_histogram.supports_auto_resize());
 }
 
 #[test]
-fn fixed_inline_histogram_rejects_too_small_capacity() {
-    let result = FixedInlineHistogram::<16>::builder()
-        .significant_digits(3)
-        .highest_trackable_value(20_000)
-        .build();
-
-    assert!(matches!(result, Err(crate::core::CreationError::RequiresExcessiveArrayLen)));
-}
-
-#[test]
-fn fixed_inline_histogram_supports_smaller_counter_types() {
-    let mut histogram = FixedInlineHistogramWithCounter::<u32, 4096>::builder()
-        .significant_digits(2)
-        .highest_trackable_value(20_000)
-        .build()
-        .unwrap();
+fn static_histogram_supports_smaller_counter_types() {
+    let mut histogram = TestStaticHistogramU32::new();
 
     succ!(histogram.record_value_with_count(100, 3));
     assert_eq!(Some(3), histogram.get_count_at_value(100));
     assert_eq!(3, histogram.get_total_count());
+}
+
+#[test]
+fn static_histogram_record_value_overflow_throws() {
+    let mut histogram = TestStaticHistogram::new();
+
+    assert!(matches!(
+        histogram.record_value(40_001),
+        Err(RecordError::ValueOutOfRangeResizeDisabled)
+    ));
+}
+
+#[test]
+fn static_histogram_record_value_with_expected_interval() {
+    let mut histogram = TestStaticHistogram::new();
+    let mut regular = Histogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    succ!(histogram.record_value_with_expected_interval(1_000, 250));
+    succ!(regular.record_value_with_expected_interval(1_000, 250));
+
+    assert_eq!(regular.get_total_count(), histogram.get_total_count());
+    for value in [250, 500, 750, 1_000] {
+        assert_eq!(regular.get_count_at_value(value), histogram.get_count_at_value(value));
+    }
+}
+
+#[test]
+fn static_histogram_add_subtract_and_equality_match_regular() {
+    let mut left = TestStaticHistogram::new();
+    let mut right = TestStaticHistogram::new();
+    let mut regular_left = Histogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+    let mut regular_right = Histogram::builder()
+        .significant_digits(2)
+        .highest_trackable_value(20_000)
+        .auto_resize(false)
+        .build()
+        .unwrap();
+
+    for value in [10, 20, 2_000] {
+        succ!(left.record_value(value));
+        succ!(regular_left.record_value(value));
+    }
+    for value in [20, 2_000] {
+        succ!(right.record_value(value));
+        succ!(regular_right.record_value(value));
+    }
+
+    let before = left.hash_code();
+    succ!(left.add(&right));
+    succ!(regular_left.add(&regular_right));
+    assert_ne!(before, left.hash_code());
+    assert_eq!(regular_left.get_total_count(), left.get_total_count());
+    assert_eq!(regular_left.get_count_at_value(20), left.get_count_at_value(20));
+    assert!(left != right);
+
+    succ!(left.subtract(&right));
+    assert_eq!(Some(1), left.get_count_at_value(20));
+    assert_eq!(3, left.get_total_count());
+
+    let mut expected = TestStaticHistogram::new();
+    for value in [10, 20, 2_000] {
+        succ!(expected.record_value(value));
+    }
+    assert!(left == expected);
+}
+
+#[test]
+fn static_histogram_subtract_to_negative_counts_throws() {
+    let mut left = TestStaticHistogram::new();
+    let mut right = TestStaticHistogram::new();
+
+    succ!(left.record_value(10));
+    succ!(right.record_value(10));
+    succ!(right.record_value(10));
+
+    assert!(matches!(left.subtract(&right), Err(SubtractionError::CountExceededAtValue)));
+}
+
+#[test]
+fn static_histogram_reset_clears_counts_and_metadata() {
+    let mut histogram = TestStaticHistogram::new();
+    succ!(histogram.record_value(10));
+    histogram.meta_data.set_tag_string("tag".to_string());
+
+    histogram.reset();
+
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(Some(0), histogram.get_count_at_value(10));
+    assert_eq!(0, histogram.get_max_value());
+    assert_eq!(0, histogram.get_min_value());
+    assert!(histogram.meta_data.tag.is_none());
 }
 
 #[test]

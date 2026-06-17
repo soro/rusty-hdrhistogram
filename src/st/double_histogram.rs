@@ -367,6 +367,7 @@ impl<P: OverflowPolicy> DoubleHistogramWithPolicy<P> {
             self.current_lowest_value_in_auto_range,
             self.current_highest_value_limit_in_auto_range,
         );
+        target.set_auto_resize(self.is_auto_resize());
         target.add_while_correcting_for_coordinated_omission(self, expected_interval_between_value_samples)?;
         Ok(target)
     }

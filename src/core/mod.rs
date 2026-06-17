@@ -15,7 +15,7 @@ pub(crate) use self::constructable_histogram::ConstructableHistogram;
 pub use self::double_policy::{OverflowPolicy, SaturateOnOverflow, ThrowOnOverflow};
 pub use self::errors::*;
 pub use self::histogram_settings::HistogramSettings;
-pub(crate) use self::histogram_settings::{HistogramLayout, HistogramStorageMetadata};
+pub(crate) use self::histogram_settings::{ceil_log2_u64, floor_log2_u64, HistogramLayout, HistogramStorageMetadata};
 pub use self::meta_data::HistogramMetaData;
 #[doc(hidden)]
 pub use self::readable_histogram::ReadableHistogram;

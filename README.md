@@ -40,6 +40,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 precision. Use
 `hdrhistogram::st::HistogramWithCounter::<u32>::builder().significant_digits(3)` when narrower counters are useful.
 
+## Fast Fixed-Range Histograms
+
+For the lowest single-threaded recording cost, define a static fixed-range
+histogram when the value range is known ahead of time. Static histograms store
+the count array directly in the histogram object and encode the HdrHistogram
+layout in the type, so recording avoids both the `Vec` allocation and per-value
+layout field loads used by the resizable `Histogram`.
+
+```rust
+hdrhistogram::static_histogram! {
+    type RequestLatencyHistogram = {
+        lowest_discernible_value: 1,
+        highest_trackable_value: 3_600 * 1_000 * 1_000,
+        significant_digits: 3,
+    };
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut histogram = RequestLatencyHistogram::new();
+    histogram.record_value(42)?;
+
+    Ok(())
+}
+```
+
+The `static_histogram!` macro computes the required inline count-array length at
+compile time and aliases a fully parameterized `st::StaticHistogram`. Invalid
+layout parameters fail at compile time. For very large ranges, remember that the
+count array is embedded in the value itself; keep large instances boxed or
+stored in long-lived owner structs rather than casually copying them around.
+
 ## Double Histograms
 
 ```rust
@@ -217,6 +248,46 @@ Java-style `HistogramLogProcessor` arguments are also accepted at the top level:
 ```text
 cargo run --features cli --bin hdrhistogram -- -csv -i latency.hlog -o latency -outputValueUnitRatio 1000000
 ```
+
+## Java Compatibility Notes
+
+The V2 binary encoding and histogram-log formats are intended to be compatible
+with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
+
+- Rust histograms use exact integer power-of-two layout math for
+  `lowest_discernible_value`. Java HdrHistogram computes the same internal unit
+  magnitude through floating-point logarithms, which can round very large
+  values just below powers of two into a coarser bucket layout. For typical
+  settings such as `lowest_discernible_value: 1`, `1000`, or exact powers of
+  two, the layouts match. If you encode histograms with pathological high lower
+  bounds such as `2^49 - 1`, prefer this crate's reader and CLI for analysis, or
+  choose an exact power-of-two lower bound when Java tooling must consume the
+  data.
+- Rust double histograms preserve the source `auto_resize` setting in
+  `copy_corrected_for_coordinated_omission()`. Java currently creates the
+  corrected double-histogram target with auto-resize disabled. Fixed-range Rust
+  copies remain fixed and can still return an out-of-range error; auto-resizing
+  Rust copies can shift/grow while replaying corrected values.
+- Rust avoids a Java double-histogram range-shift bug where the high-side shift
+  path can scale the published range twice. This preserves the pre-shift value
+  mapping instead of matching Java's current corrupting edge behavior.
+- HdrHistogram allocates count storage in bucket-sized chunks, so the allocated
+  array can sometimes record values above the configured
+  `highest_trackable_value`. Calling `resize(x)` with a value that already fits
+  in the current allocation may be treated as a fast no-op; `settings()` and
+  encoded headers can continue to report the earlier configured high value even
+  though the backing storage can represent `x`.
+- Zero-count records follow the Java-style mutation path. Calling
+  `record_value_with_count(value, 0)` can update range/min/max tracking even
+  though the total count does not increase.
+- A zero-only histogram with `lowest_discernible_value > 1` can report the
+  highest equivalent value of zero as max after decode or metadata
+  recalculation, matching Java's edge behavior. Avoid relying on max-value
+  metadata for zero-only histograms with coarse lowest-discernible values.
+- Bucket counts, total counts, equivalent-value helpers, and iterator aggregate
+  math use unchecked HdrHistogram-style arithmetic for speed. Histograms near
+  the top `u64` bucket or with extreme `value * count` products can overflow
+  helper calculations, which may panic in debug builds.
 
 ## API Shape
 

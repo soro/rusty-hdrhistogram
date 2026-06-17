@@ -10,12 +10,19 @@ use hdrhistogram::concurrent::{
     SaturatingConcurrentDoubleHistogram, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder,
     SingleWriterRecorder,
 };
-use hdrhistogram::st::{DoubleHistogram, FixedInlineHistogram, Histogram, HistogramWithCounter, SaturatingDoubleHistogram};
+use hdrhistogram::st::{DoubleHistogram, Histogram, HistogramWithCounter, SaturatingDoubleHistogram};
 use rand::Rng;
 use std::hint::black_box;
 
 const MOSTLY_CLAMPED_VALUE_COUNT: usize = 1024;
-const INLINE_COUNTS_CAPACITY: usize = 23_552;
+
+hdrhistogram::static_histogram! {
+    type BenchStaticHistogram = {
+        lowest_discernible_value: 1,
+        highest_trackable_value: common::HIGHEST_TRACKABLE_VALUE,
+        significant_digits: common::SIGNIFICANT_VALUE_DIGITS,
+    };
+}
 
 fn mostly_clamped_double_values() -> Vec<f64> {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
@@ -114,14 +121,9 @@ fn record_value_histogram_u64(c: &mut Criterion) {
     });
 }
 
-fn record_value_fixed_inline_histogram_u64(c: &mut Criterion) {
-    c.bench_function("record_value_fixed_inline_histogram_u64", |b| {
-        let mut histogram = FixedInlineHistogram::<INLINE_COUNTS_CAPACITY>::builder()
-            .lowest_discernible_value(1)
-            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
-            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
-            .build()
-            .unwrap();
+fn record_value_static_histogram_u64(c: &mut Criterion) {
+    c.bench_function("record_value_static_histogram_u64", |b| {
+        let mut histogram = BenchStaticHistogram::new();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -514,7 +516,7 @@ fn percentile_iter(c: &mut Criterion) {
 criterion_group!(
     benches,
     record_value_histogram_u64,
-    record_value_fixed_inline_histogram_u64,
+    record_value_static_histogram_u64,
     record_value_histogram_u32,
     record_value_fixed_concurrent_histogram,
     record_value_resizable_concurrent_histogram,

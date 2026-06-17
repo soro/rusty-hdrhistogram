@@ -402,6 +402,64 @@ fn record_value_with_expected_interval() {
     run_record_value_with_expected_interval_test::<ConcurrentDoubleHistogram>();
 }
 
+fn run_copy_corrected_for_coordinated_omission_preserves_auto_resize_test<H: TestDoubleHistogram>() {
+    let mut histogram = H::with_highest_to_lowest_value_ratio(2, 0).unwrap();
+    histogram.set_auto_resize(true);
+    succ!(histogram.record_value(16.0));
+
+    let corrected = histogram.copy_corrected_for_coordinated_omission(1.0).unwrap();
+
+    assert_eq!(16, corrected.get_total_count());
+    assert_eq!(1, corrected.get_count_at_value(1.0));
+    assert_eq!(1, corrected.get_count_at_value(16.0));
+    assert!(corrected.get_current_lowest_trackable_non_zero_value() <= 1.0);
+}
+
+#[test]
+fn copy_corrected_for_coordinated_omission_preserves_auto_resize() {
+    run_copy_corrected_for_coordinated_omission_preserves_auto_resize_test::<DoubleHistogram>();
+    run_copy_corrected_for_coordinated_omission_preserves_auto_resize_test::<ConcurrentDoubleHistogram>();
+}
+
+fn run_copy_corrected_for_coordinated_omission_keeps_fixed_range_test<H: TestDoubleHistogram>() {
+    let mut histogram = H::with_highest_to_lowest_value_ratio(2, 0).unwrap();
+    histogram.set_auto_resize(true);
+    succ!(histogram.record_value(16.0));
+    histogram.set_auto_resize(false);
+
+    assert!(matches!(
+        histogram.copy_corrected_for_coordinated_omission(1.0),
+        Err(RecordError::ValueOutOfRangeResizeDisabled)
+    ));
+}
+
+#[test]
+fn copy_corrected_for_coordinated_omission_keeps_fixed_range() {
+    run_copy_corrected_for_coordinated_omission_keeps_fixed_range_test::<DoubleHistogram>();
+    run_copy_corrected_for_coordinated_omission_keeps_fixed_range_test::<ConcurrentDoubleHistogram>();
+}
+
+#[test]
+fn saturating_copy_corrected_for_coordinated_omission_preserves_auto_resize() {
+    let mut st_histogram = SaturatingDoubleHistogram::with_highest_to_lowest_value_ratio(2, 0).unwrap();
+    st_histogram.set_auto_resize(true);
+    succ!(st_histogram.record_value(16.0));
+
+    let corrected = st_histogram.copy_corrected_for_coordinated_omission(1.0).unwrap();
+    assert_eq!(16, corrected.get_total_count());
+    assert_eq!(1, corrected.get_count_at_value(1.0));
+    assert_eq!(1, corrected.get_count_at_value(16.0));
+
+    let concurrent_histogram = SaturatingConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(2, 0).unwrap();
+    concurrent_histogram.set_auto_resize(true);
+    succ!(concurrent_histogram.record_value(16.0));
+
+    let corrected = concurrent_histogram.copy_corrected_for_coordinated_omission(1.0).unwrap();
+    assert_eq!(16, corrected.get_total_count());
+    assert_eq!(1, corrected.get_count_at_value(1.0));
+    assert_eq!(1, corrected.get_count_at_value(16.0));
+}
+
 fn run_reset_test<H: TestDoubleHistogram>() {
     let mut histogram = H::with_highest_to_lowest_value_ratio(TRACKABLE_VALUE_RANGE_SIZE, NUMBER_OF_SIGNIFICANT_VALUE_DIGITS).unwrap();
     succ!(histogram.record_value(TEST_VALUE_LEVEL));

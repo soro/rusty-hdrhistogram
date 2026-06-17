@@ -50,6 +50,18 @@ macro_rules! expect {
     };
 }
 
+pub(crate) const fn floor_log2_u64(value: u64) -> u32 {
+    63 - value.leading_zeros()
+}
+
+pub(crate) const fn ceil_log2_u64(value: u64) -> u32 {
+    if value <= 1 {
+        0
+    } else {
+        64 - (value - 1).leading_zeros()
+    }
+}
+
 impl HistogramLayout {
     pub(crate) fn new(
         lowest_discernible_value: u64,
@@ -63,10 +75,10 @@ impl HistogramLayout {
 
         let largest_value_with_single_unit_resolution = 2 * 10_u64.pow(u32::from(significant_value_digits));
 
-        let unit_magnitude = (lowest_discernible_value as f64).log2().floor() as u32;
-        let unit_magnitude_mask = (1 << unit_magnitude) - 1;
+        let unit_magnitude = floor_log2_u64(lowest_discernible_value);
+        let unit_magnitude_mask = (1_u64 << unit_magnitude) - 1;
 
-        let sub_bucket_count_magnitude = (largest_value_with_single_unit_resolution as f64).log2().ceil() as u32;
+        let sub_bucket_count_magnitude = ceil_log2_u64(largest_value_with_single_unit_resolution);
         let sub_bucket_half_count_magnitude = sub_bucket_count_magnitude - 1;
         let sub_bucket_count = 1 << sub_bucket_count_magnitude;
 

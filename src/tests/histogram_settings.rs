@@ -54,6 +54,19 @@ fn unit_magnitude_4_index_calculations() {
 }
 
 #[test]
+fn near_power_of_two_lowest_discernible_uses_exact_floor_log2() {
+    let lowest = (1_u64 << 49) - 1;
+    let s = HistogramSettings::new(lowest, lowest * 2, 3).unwrap();
+
+    assert_eq!(2048, s.sub_bucket_count);
+    assert_eq!(48, s.unit_magnitude);
+    assert_eq!(1, s.bucket_count);
+    assert_eq!(1_u64 << 48, s.lowest_equivalent_value(lowest));
+    assert_eq!(lowest, s.highest_equivalent_value(lowest));
+    assert_eq!(1, s.counts_array_index(lowest));
+}
+
+#[test]
 fn unit_magnitude_52_sub_bucket_magnitude_11_index_calculations() {
     let s = HistogramSettings::new(1_u64 << 52, u64::MAX, 3).unwrap();
 

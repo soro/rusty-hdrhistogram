@@ -672,6 +672,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
             source_view.get_current_lowest_trackable_non_zero_value(),
             source_view.get_current_highest_trackable_value(),
         );
+        target.set_auto_resize(source_settings.auto_resize);
         target.add_view_while_correcting_for_coordinated_omission(source_view, source_ratio, expected_interval_between_value_samples)?;
         Ok(target)
     }
