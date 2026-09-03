@@ -13,6 +13,14 @@ crate::static_histogram! {
 
 type TestStaticHistogramU32 = StaticHistogramWithCounter<u32, 1, 20_000, 2, { static_histogram_counts_array_length(1, 20_000, 2) }>;
 
+crate::static_histogram! {
+    type OffsetStaticHistogram = {
+        lowest_discernible_value: 1_024,
+        highest_trackable_value: 1_000_000,
+        significant_digits: 2,
+    };
+}
+
 fn verify_max_value<T: Counter>(histogram: HistogramWithCounter<T>) {
     let mut computed_max_value = 0;
     for i in 0..histogram.counts_array_length() {
@@ -205,6 +213,140 @@ fn static_histogram_add_subtract_and_equality_match_regular() {
         succ!(expected.record_value(value));
     }
     assert!(left == expected);
+}
+
+#[test]
+fn static_histogram_add_empty_histogram_keeps_empty_tracking_values() {
+    let mut left = OffsetStaticHistogram::new();
+    let right = OffsetStaticHistogram::new();
+
+    succ!(left.add(&right));
+
+    assert_eq!(0, left.get_total_count());
+    assert_eq!(0, left.get_max_value());
+    assert_eq!(u64::MAX, left.get_min_non_zero_value());
+    assert!(left == right);
+}
+
+#[test]
+fn histogram_add_empty_histogram_keeps_empty_tracking_values() {
+    let mut left = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    let right = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+
+    succ!(left.add(&right));
+
+    assert_eq!(0, left.get_total_count());
+    assert_eq!(0, left.get_max_value());
+    assert_eq!(u64::MAX, left.get_min_non_zero_value());
+    assert!(left == right);
+}
+
+#[test]
+fn adding_zero_only_histograms_preserves_exact_zero_max() {
+    let mut histogram = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    let mut zero_only = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    succ!(zero_only.record_value(0));
+
+    succ!(histogram.add(&zero_only));
+
+    assert_eq!(1, histogram.get_total_count());
+    assert_eq!(0, histogram.get_max_value());
+    assert_eq!(u64::MAX, histogram.get_min_non_zero_value());
+
+    let mut static_histogram = OffsetStaticHistogram::new();
+    let mut static_zero_only = OffsetStaticHistogram::new();
+    succ!(static_zero_only.record_value(0));
+
+    succ!(static_histogram.add(&static_zero_only));
+
+    assert_eq!(1, static_histogram.get_total_count());
+    assert_eq!(0, static_histogram.get_max_value());
+    assert_eq!(u64::MAX, static_histogram.get_min_non_zero_value());
+}
+
+#[test]
+fn adding_zero_count_tracking_histograms_preserves_tracking_values() {
+    let mut histogram = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    let mut zero_count = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    succ!(zero_count.record_value_with_count(2_048, 0));
+
+    succ!(histogram.add(&zero_count));
+
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(3_071, histogram.get_max_value());
+    assert_eq!(2_048, histogram.get_min_non_zero_value());
+
+    let mut static_histogram = OffsetStaticHistogram::new();
+    let mut static_zero_count = OffsetStaticHistogram::new();
+    succ!(static_zero_count.record_value_with_count(2_048, 0));
+
+    succ!(static_histogram.add(&static_zero_count));
+
+    assert_eq!(0, static_histogram.get_total_count());
+    assert_eq!(3_071, static_histogram.get_max_value());
+    assert_eq!(2_048, static_histogram.get_min_non_zero_value());
+}
+
+#[test]
+fn reset_restores_empty_tracking_values_for_coarse_layouts() {
+    let mut histogram = Histogram::builder()
+        .lowest_discernible_value(1_024)
+        .highest_trackable_value(1_000_000)
+        .significant_digits(2)
+        .build()
+        .unwrap();
+    succ!(histogram.record_value(2_048));
+
+    histogram.reset();
+
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(0, histogram.get_max_value());
+    assert_eq!(u64::MAX, histogram.get_min_non_zero_value());
+    succ!(histogram.record_value(0));
+    assert_eq!(1, histogram.get_total_count());
+    assert_eq!(0, histogram.get_max_value());
+
+    let mut static_histogram = OffsetStaticHistogram::new();
+    succ!(static_histogram.record_value(2_048));
+
+    static_histogram.reset();
+
+    assert_eq!(0, static_histogram.get_total_count());
+    assert_eq!(0, static_histogram.get_max_value());
+    assert_eq!(u64::MAX, static_histogram.get_min_non_zero_value());
+    succ!(static_histogram.record_value(0));
+    assert_eq!(1, static_histogram.get_total_count());
+    assert_eq!(0, static_histogram.get_max_value());
 }
 
 #[test]

@@ -589,11 +589,11 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
         self.read_view().values_are_equivalent(value1, value2)
     }
 
-    pub fn get_current_lowest_trackable_non_zero_value(&self) -> f64 {
+    pub(crate) fn get_current_lowest_trackable_non_zero_value(&self) -> f64 {
         self.current_lowest_value_in_auto_range()
     }
 
-    pub fn get_current_highest_trackable_value(&self) -> f64 {
+    pub(crate) fn get_current_highest_trackable_value(&self) -> f64 {
         self.current_highest_value_limit_in_auto_range()
     }
 

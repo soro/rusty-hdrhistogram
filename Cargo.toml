@@ -6,7 +6,7 @@ license = "MIT"
 readme = "README.md"
 keywords = ["stats", "profiling", "metrics"]
 description = "A Rust port of HdrHistogram"
-repository = "https://github.org/soro/rusty-hdrhistogram.git"
+repository = "https://github.com/soro/rusty-hdrhistogram.git"
 categories = ["data-structures"]
 edition = "2021"
 

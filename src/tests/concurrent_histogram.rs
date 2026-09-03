@@ -257,6 +257,33 @@ fn fixed_clear_counts_for_reuse_resets_tracking() {
 }
 
 #[test]
+fn concurrent_clear_counts_preserves_empty_max_sentinel_for_coarse_layouts() {
+    let mut resizable = ResizableConcurrentHistogram::with_low_high_sigvdig(1_024, 1_000_000, 2).unwrap();
+    succ!(resizable.record_value(2_048));
+
+    resizable.clear_counts_for_reuse();
+
+    assert_eq!(0, resizable.get_total_count());
+    assert_eq!(0, resizable.get_max_value());
+    assert_eq!(ORIGINAL_MIN, resizable.get_min_non_zero_value());
+    succ!(resizable.record_value(0));
+    assert_eq!(1, resizable.get_total_count());
+    assert_eq!(0, resizable.get_max_value());
+
+    let mut fixed = FixedConcurrentHistogram::with_low_high_sigvdig(1_024, 1_000_000, 2).unwrap();
+    succ!(fixed.record_value(2_048));
+
+    fixed.clear_counts_for_reuse();
+
+    assert_eq!(0, fixed.get_total_count());
+    assert_eq!(0, fixed.get_max_value());
+    assert_eq!(ORIGINAL_MIN, fixed.get_min_non_zero_value());
+    succ!(fixed.record_value(0));
+    assert_eq!(1, fixed.get_total_count());
+    assert_eq!(0, fixed.get_max_value());
+}
+
+#[test]
 fn concurrent_double_reset_clears_metadata() {
     let mut histogram = ConcurrentDoubleHistogram::builder()
         .highest_to_lowest_value_ratio(1024)

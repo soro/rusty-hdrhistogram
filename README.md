@@ -279,9 +279,22 @@ with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
   in the current allocation may be treated as a fast no-op; `settings()` and
   encoded headers can continue to report the earlier configured high value even
   though the backing storage can represent `x`.
+- Java integer histograms use positive signed `long` values, so Java-compatible
+  data should keep recorded values and `highest_trackable_value` at or below
+  `i64::MAX`. This crate exposes `u64` integer histograms and can build
+  Rust-only ranges above that limit, but some top-bucket helper math uses the
+  Java-style unchecked arithmetic shape for speed. Avoid percentile, equivalent
+  range, and aggregate helper queries in the extreme top `u64` range unless the
+  data will stay below the Java-compatible signed range.
 - Zero-count records follow the Java-style mutation path. Calling
   `record_value_with_count(value, 0)` can update range/min/max tracking even
   though the total count does not increase.
+- Unlike Java, adding a newly constructed or reset empty histogram leaves the
+  destination's count and range tracking unchanged, and resetting a histogram
+  restores an exact empty max value of zero. Java's compatible-layout `add()`
+  and `reset()` paths fold the empty max sentinel through the unit-magnitude
+  mask, so histograms with `lowest_discernible_value > 1` can spuriously report
+  a non-zero max.
 - A zero-only histogram with `lowest_discernible_value > 1` can report the
   highest equivalent value of zero as max after decode or metadata
   recalculation, matching Java's edge behavior. Avoid relying on max-value

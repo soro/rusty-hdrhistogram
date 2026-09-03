@@ -44,6 +44,9 @@ const fn static_sub_bucket_count_magnitude(
     let largest_value_with_single_unit_resolution = 2 * pow10_u64(significant_value_digits);
     let sub_bucket_count_magnitude = ceil_log2_u64(largest_value_with_single_unit_resolution);
     let unit_magnitude = floor_log2_u64(lowest_discernible_value);
+    // Java rejects layouts above bit 62 because integer histograms use a
+    // positive signed long range. Static u64 histograms can represent one extra
+    // bit, but Java-compatible data should stay <= i64::MAX.
     if unit_magnitude + sub_bucket_count_magnitude > 63 {
         panic!("cannot represent the requested significant digits at the lowest discernible value");
     }
@@ -489,7 +492,13 @@ impl<
     }
 
     fn reset_max_value(&mut self, max_value: u64) {
-        self.raw_max_value = max_value | Self::UNIT_MAGNITUDE_MASK;
+        // Keep the empty-sentinel special case on reset/rebuild paths; the
+        // recording-path update helper above must stay branch-free.
+        self.raw_max_value = if max_value == ORIGINAL_MAX {
+            ORIGINAL_MAX
+        } else {
+            max_value | Self::UNIT_MAGNITUDE_MASK
+        };
     }
 
     fn update_min_non_zero_value(&mut self, value: u64) {
@@ -598,8 +607,16 @@ impl<
         }
 
         self.total_count += observed_other_total_count;
-        self.update_max_value(other_histogram.get_max_value());
-        self.update_min_non_zero_value(other_histogram.get_min_non_zero_value());
+        // Handle sentinels here rather than adding branches to the
+        // recording-path update helpers.
+        let other_max_value = other_histogram.get_max_value();
+        if other_max_value != ORIGINAL_MAX {
+            self.update_max_value(other_max_value);
+        }
+        let other_min_non_zero_value = other_histogram.get_min_non_zero_value();
+        if other_min_non_zero_value != ORIGINAL_MIN {
+            self.update_min_non_zero_value(other_min_non_zero_value);
+        }
         Ok(())
     }
 

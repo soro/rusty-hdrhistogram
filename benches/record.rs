@@ -15,6 +15,7 @@ use rand::Rng;
 use std::hint::black_box;
 
 const MOSTLY_CLAMPED_VALUE_COUNT: usize = 1024;
+const JAVA_MAX_HISTOGRAM_VALUE: u64 = i64::MAX as u64;
 
 hdrhistogram::static_histogram! {
     type BenchStaticHistogram = {
@@ -444,7 +445,7 @@ fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
     c.bench_function("record_precalc_random_values_with_1_count_u64", |b| {
         let mut histogram = Histogram::builder()
             .lowest_discernible_value(1)
-            .highest_trackable_value(u64::MAX)
+            .highest_trackable_value(JAVA_MAX_HISTOGRAM_VALUE)
             .significant_digits(3)
             .build()
             .unwrap();
@@ -452,7 +453,7 @@ fn record_precalc_random_values_with_1_count_u64(c: &mut Criterion) {
         let mut rng = rand::thread_rng();
 
         for _ in 0..3000000 {
-            values.push(rng.gen::<u64>());
+            values.push(rng.gen_range(0..=JAVA_MAX_HISTOGRAM_VALUE));
         }
 
         b.iter(|| {
@@ -467,7 +468,7 @@ fn bench_percentile(c: &mut Criterion) {
     c.bench_function("bench_percentile", |b| {
         let mut histogram = Histogram::builder()
             .lowest_discernible_value(1)
-            .highest_trackable_value(u64::MAX)
+            .highest_trackable_value(JAVA_MAX_HISTOGRAM_VALUE)
             .significant_digits(3)
             .build()
             .unwrap();
@@ -475,7 +476,7 @@ fn bench_percentile(c: &mut Criterion) {
         let mut rng = rand::thread_rng();
 
         for _ in 0..1000000 {
-            indices.push(rng.gen());
+            indices.push(rng.gen_range(0..=JAVA_MAX_HISTOGRAM_VALUE));
         }
 
         for value in indices.iter() {
@@ -494,7 +495,7 @@ fn percentile_iter(c: &mut Criterion) {
     c.bench_function("percentile_iter", |b| {
         let mut histogram = Histogram::builder()
             .lowest_discernible_value(1)
-            .highest_trackable_value(u64::MAX)
+            .highest_trackable_value(JAVA_MAX_HISTOGRAM_VALUE)
             .significant_digits(3)
             .build()
             .unwrap();

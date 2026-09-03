@@ -331,8 +331,7 @@ impl FixedConcurrentHistogram {
         }
         unsafe { (*counts).set_normalizing_index_offset(0) };
         self.total_count.store(0, Ordering::Relaxed);
-        self.raw_max_value
-            .store(ORIGINAL_MAX | self.layout.unit_magnitude_mask, Ordering::Relaxed);
+        self.raw_max_value.store(ORIGINAL_MAX, Ordering::Relaxed);
         self.raw_min_non_zero_value.store(ORIGINAL_MIN, Ordering::Relaxed);
         self.meta_data.clear();
     }
@@ -404,8 +403,7 @@ impl ConstructableHistogram for FixedConcurrentHistogram {
     }
 
     fn establish_internal_tracking_values(&mut self) {
-        self.raw_max_value
-            .store(ORIGINAL_MAX | self.layout.unit_magnitude_mask, Ordering::Relaxed);
+        self.raw_max_value.store(ORIGINAL_MAX, Ordering::Relaxed);
         self.raw_min_non_zero_value.store(ORIGINAL_MIN, Ordering::Relaxed);
         let array_length = self.counts_array_length();
         let (new_max, new_min, new_total) = util::recalculate_internal_tracking_values(self, array_length);

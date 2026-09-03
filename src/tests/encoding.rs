@@ -2,8 +2,12 @@ use crate::concurrent::{DoubleRecorder, ResizableConcurrentHistogram};
 use crate::core::histogram_settings::{HistogramSettings, V2_ENCODING_HEADER_SIZE, V2_ENCODING_MAX_WORD_SIZE_IN_BYTES};
 use crate::encoding::*;
 use crate::st::{DoubleHistogram, Histogram};
+#[cfg(feature = "encoding-compression")]
+use flate2::{read::ZlibEncoder, Compression};
 #[cfg(feature = "encoding-base64")]
 use std::io::Cursor;
+#[cfg(feature = "encoding-compression")]
+use std::io::Read;
 
 crate::static_histogram! {
     type EncodingStaticHistogram = {
@@ -173,6 +177,56 @@ fn compressed_histogram_roundtrip_preserves_counts() {
 
 #[cfg(feature = "encoding-compression")]
 #[test]
+fn compressed_histogram_decode_ignores_trailing_inflated_bytes_without_materializing_them() {
+    let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
+    histogram.record_value_with_count(100, 3).unwrap();
+
+    let mut raw = encode_histogram_v2(&histogram).unwrap();
+    raw.extend(std::iter::repeat(0_u8).take(1024 * 1024));
+    let compressed = zlib_compress(&raw);
+    let encoded = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &compressed);
+
+    let decoded = decode_histogram_compressed(&encoded).unwrap();
+    assert_eq!(Some(3), decoded.get_count_at_value(100));
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
+fn compressed_histogram_decode_rejects_payload_length_larger_than_layout_capacity() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&V2_ENCODING_COOKIE.to_be_bytes());
+    raw.extend_from_slice(&i32::MAX.to_be_bytes());
+    raw.extend_from_slice(&0_i32.to_be_bytes());
+    raw.extend_from_slice(&2_i32.to_be_bytes());
+    raw.extend_from_slice(&1_i64.to_be_bytes());
+    raw.extend_from_slice(&1_024_i64.to_be_bytes());
+    raw.extend_from_slice(&1.0_f64.to_be_bytes());
+
+    let compressed = zlib_compress(&raw);
+    let encoded = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &compressed);
+
+    assert!(matches!(decode_histogram_compressed(&encoded), Err(DecodeError::InvalidPayload)));
+}
+
+#[cfg(feature = "encoding-compression")]
+fn zlib_compress(raw: &[u8]) -> Vec<u8> {
+    let mut encoder = ZlibEncoder::new(raw, Compression::default());
+    let mut compressed = Vec::new();
+    encoder.read_to_end(&mut compressed).unwrap();
+    compressed
+}
+
+#[cfg(feature = "encoding-compression")]
+fn compressed_frame(cookie: u32, compressed: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(8 + compressed.len());
+    encoded.extend_from_slice(&cookie.to_be_bytes());
+    encoded.extend_from_slice(&(compressed.len() as i32).to_be_bytes());
+    encoded.extend_from_slice(compressed);
+    encoded
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
 fn compressed_double_histogram_roundtrip_preserves_counts() {
     let mut histogram = DoubleHistogram::new(3).unwrap();
     histogram.record_value_with_count(2.0, 3).unwrap();
@@ -222,6 +276,19 @@ fn histogram_log_line_roundtrip_preserves_metadata_and_counts() {
 
 #[cfg(feature = "encoding-base64")]
 #[test]
+fn histogram_log_line_rejects_empty_tag_on_encode() {
+    let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
+    histogram.record_value(100).unwrap();
+    histogram.meta_data.set_tag_string(String::new());
+
+    assert!(matches!(
+        encode_histogram_log_line_with_max_value_unit_ratio(&histogram, 10.0, 11.0, 1.0),
+        Err(EncodeError::InvalidLogLine(_))
+    ));
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
 fn histogram_log_comment_lines_parse() {
     assert!(matches!(
         decode_histogram_log_line("#[StartTime: 10.125 (seconds since epoch)]").unwrap(),
@@ -258,6 +325,18 @@ fn histogram_log_scanner_defers_payload_decoding() {
             assert!(matches!(interval.decode_histogram(), Err(DecodeError::Base64(_))));
         }
         _ => panic!("did not scan interval log line"),
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_scanner_rejects_non_finite_and_negative_interval_metadata() {
+    for line in [
+        "1.000,-1.000,42.000,not-base64",
+        "1.000,1.000,NaN,not-base64",
+        "inf,1.000,42.000,not-base64",
+    ] {
+        assert!(matches!(scan_histogram_log_line(line), Err(DecodeError::InvalidLogLine(_))));
     }
 }
 
@@ -670,6 +749,37 @@ fn histogram_log_report_can_correct_for_coordinated_omission() {
 
     let report = generate_histogram_log_report(log.lines(), &config).unwrap();
     assert!(report.interval_log.contains("1.000,10,"));
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_report_truncates_integer_coordinated_omission_interval_like_java() {
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
+    histogram.record_value(100).unwrap();
+
+    let log = format!(
+        "{}{}",
+        histogram_log_start_time_line(10.0),
+        encode_histogram_log_line_with_max_value_unit_ratio(&histogram, 10.0, 11.0, 1.0).unwrap(),
+    );
+
+    let fractional_interval_config = HistogramLogReportConfig {
+        output_value_unit_ratio: 1.0,
+        expected_interval_for_coordinated_omission_correction: 50.7,
+        csv: true,
+        ..HistogramLogReportConfig::default()
+    };
+    let report = generate_histogram_log_report(log.lines(), &fractional_interval_config).unwrap();
+    assert!(report.interval_log.contains("1.000,2,"));
+
+    let sub_unit_interval_config = HistogramLogReportConfig {
+        output_value_unit_ratio: 1.0,
+        expected_interval_for_coordinated_omission_correction: 0.5,
+        csv: true,
+        ..HistogramLogReportConfig::default()
+    };
+    let report = generate_histogram_log_report(log.lines(), &sub_unit_interval_config).unwrap();
+    assert!(report.interval_log.contains("1.000,1,"));
 }
 
 #[cfg(feature = "encoding-base64")]

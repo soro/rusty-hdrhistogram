@@ -5,6 +5,8 @@
 //! reader/writer APIs, and report generation require `encoding-base64`.
 
 use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
+#[cfg(feature = "encoding-compression")]
+use crate::core::HistogramSettings;
 use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, ReadableHistogram};
 use crate::st::{DoubleHistogram, DoubleHistogramWithPolicy, Histogram};
 
@@ -19,10 +21,10 @@ use flate2::{read::ZlibDecoder, read::ZlibEncoder, Compression};
 #[cfg(feature = "encoding-base64")]
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
-#[cfg(feature = "encoding-compression")]
-use std::io::Read;
 #[cfg(feature = "encoding-base64")]
 use std::io::{BufRead, Cursor, Write};
+#[cfg(feature = "encoding-compression")]
+use std::io::{ErrorKind, Read};
 
 const V0_ENCODING_COOKIE_BASE: u32 = 0x1c849308;
 const V0_COMPRESSED_ENCODING_COOKIE_BASE: u32 = 0x1c849309;
@@ -38,6 +40,7 @@ pub const DOUBLE_HISTOGRAM_COMPRESSED_ENCODING_COOKIE: u32 = 0x0c72124f;
 
 const V2_MAX_WORD_SIZE_IN_BYTES: u8 = 9;
 const ENCODING_HEADER_SIZE: usize = 40;
+const V0_ENCODING_HEADER_SIZE: usize = 32;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EncodeError {
@@ -991,7 +994,7 @@ pub fn decode_histogram_compressed_with_min_highest_trackable_value(
         return Err(DecodeError::InvalidPayloadLength(compressed_length));
     }
     let compressed = reader.take(compressed_length as usize)?;
-    let raw = decompress_zlib(compressed)?;
+    let raw = decompress_histogram_raw(cookie, compressed, min_highest_trackable_value)?;
     decode_histogram_with_min_highest_trackable_value(&raw, min_highest_trackable_value)
 }
 
@@ -1581,9 +1584,9 @@ fn encode_log_line(
     let interval_length_sec = end_timestamp_sec - start_timestamp_sec;
     match tag {
         Some(tag) => {
-            if tag.contains(',') || tag.chars().any(char::is_whitespace) {
+            if tag.is_empty() || tag.contains(',') || tag.chars().any(char::is_whitespace) {
                 return Err(EncodeError::InvalidLogLine(
-                    "tag string cannot contain commas or whitespace".to_string(),
+                    "tag string cannot be empty or contain commas or whitespace".to_string(),
                 ));
             }
             Ok(format!(
@@ -1617,6 +1620,9 @@ fn scan_histogram_log_interval_line(line: &str) -> Result<HistogramLogScannedInt
     let start_timestamp_sec = parse_log_f64(fields.next(), line)?;
     let interval_length_sec = parse_log_f64(fields.next(), line)?;
     let max_value = parse_log_f64(fields.next(), line)?;
+    if !start_timestamp_sec.is_finite() || !interval_length_sec.is_finite() || interval_length_sec < 0.0 || !max_value.is_finite() {
+        return Err(DecodeError::InvalidLogLine(line.to_string()));
+    }
     let payload = fields.next().ok_or_else(|| DecodeError::InvalidLogLine(line.to_string()))?;
     if fields.next().is_some() {
         return Err(DecodeError::InvalidLogLine(line.to_string()));
@@ -1716,7 +1722,10 @@ impl DecodedHistogram {
                         "integer coordinated-omission interval is too large".to_string(),
                     ));
                 }
-                let expected_interval = expected_interval.ceil() as u64;
+                let expected_interval = expected_interval as u64;
+                if expected_interval == 0 {
+                    return Ok(DecodedHistogram::Integer(histogram));
+                }
                 let mut target = empty_integer_accumulator_like(&histogram)?;
                 for value in histogram.recorded_values() {
                     target
@@ -2228,13 +2237,136 @@ fn compress_zlib(raw: &[u8], compression: Compression) -> Result<Vec<u8>, Encode
 }
 
 #[cfg(feature = "encoding-compression")]
-fn decompress_zlib(compressed: &[u8]) -> Result<Vec<u8>, DecodeError> {
+fn decompress_histogram_raw(compressed_cookie: u32, compressed: &[u8], min_highest_trackable_value: u64) -> Result<Vec<u8>, DecodeError> {
+    let compressed_base = cookie_base(compressed_cookie);
+    let header_size = match compressed_base {
+        V2_COMPRESSED_ENCODING_COOKIE_BASE | V1_COMPRESSED_ENCODING_COOKIE_BASE => ENCODING_HEADER_SIZE,
+        V0_COMPRESSED_ENCODING_COOKIE_BASE => V0_ENCODING_HEADER_SIZE,
+        _ => return Err(DecodeError::InvalidCookie(compressed_cookie)),
+    };
+
     let mut decoder = ZlibDecoder::new(compressed);
-    let mut raw = Vec::new();
-    decoder
-        .read_to_end(&mut raw)
-        .map_err(|err| DecodeError::Compression(err.to_string()))?;
+    let mut raw = vec![0; header_size];
+    decoder.read_exact(&mut raw).map_err(decode_compression_read_error)?;
+
+    let payload_limit = compressed_payload_limit_from_raw_header(&raw, min_highest_trackable_value)?;
+    if let Some(payload_length) = payload_limit.exact_length {
+        raw.try_reserve_exact(payload_length).map_err(|_| DecodeError::InvalidPayload)?;
+        let payload_start = raw.len();
+        raw.resize(payload_start + payload_length, 0);
+        decoder
+            .read_exact(&mut raw[payload_start..])
+            .map_err(decode_compression_read_error)?;
+    } else {
+        let max_payload_length = payload_limit.max_length;
+        let read_limit = max_payload_length.checked_add(1).ok_or(DecodeError::InvalidPayload)?;
+        decoder
+            .take(read_limit as u64)
+            .read_to_end(&mut raw)
+            .map_err(decode_compression_read_error)?;
+        if raw.len() > header_size + max_payload_length {
+            return Err(DecodeError::InvalidPayload);
+        }
+    }
+
     Ok(raw)
+}
+
+#[cfg(feature = "encoding-compression")]
+struct CompressedPayloadLimit {
+    exact_length: Option<usize>,
+    max_length: usize,
+}
+
+#[cfg(feature = "encoding-compression")]
+fn compressed_payload_limit_from_raw_header(
+    raw_header: &[u8],
+    min_highest_trackable_value: u64,
+) -> Result<CompressedPayloadLimit, DecodeError> {
+    let mut reader = Reader::new(raw_header);
+    let cookie = reader.read_u32()?;
+    let base = cookie_base(cookie);
+    let word_size = word_size_from_cookie(cookie);
+
+    let (payload_length, number_of_significant_value_digits, lowest_discernible_value, highest_trackable_value) = match base {
+        V2_ENCODING_COOKIE_BASE | V1_ENCODING_COOKIE_BASE => {
+            if base == V2_ENCODING_COOKIE_BASE && word_size != V2_MAX_WORD_SIZE_IN_BYTES {
+                return Err(DecodeError::UnsupportedWordSize(word_size));
+            }
+            if base == V1_ENCODING_COOKIE_BASE && !matches!(word_size, 2 | 4 | 8) {
+                return Err(DecodeError::UnsupportedWordSize(word_size));
+            }
+
+            let payload_length = reader.read_i32()?;
+            if payload_length < 0 {
+                return Err(DecodeError::InvalidPayloadLength(payload_length));
+            }
+            let _normalizing_index_offset = reader.read_i32()?;
+            let number_of_significant_value_digits = reader.read_i32()?;
+            let lowest_discernible_value = reader.read_non_negative_i64()?;
+            let highest_trackable_value = reader.read_non_negative_i64()?;
+            let integer_to_double_value_conversion_ratio = reader.read_f64()?;
+            if !integer_to_double_value_conversion_ratio.is_finite() || integer_to_double_value_conversion_ratio <= 0.0 {
+                return Err(DecodeError::InvalidPayload);
+            }
+
+            (
+                Some(payload_length as usize),
+                number_of_significant_value_digits,
+                lowest_discernible_value,
+                highest_trackable_value,
+            )
+        }
+        V0_ENCODING_COOKIE_BASE => {
+            if !matches!(word_size, 2 | 4 | 8) {
+                return Err(DecodeError::UnsupportedWordSize(word_size));
+            }
+            let number_of_significant_value_digits = reader.read_i32()?;
+            let lowest_discernible_value = reader.read_non_negative_i64()?;
+            let highest_trackable_value = reader.read_non_negative_i64()?;
+            let _total_count = reader.read_i64()?;
+
+            (
+                None,
+                number_of_significant_value_digits,
+                lowest_discernible_value,
+                highest_trackable_value,
+            )
+        }
+        _ => return Err(DecodeError::InvalidCookie(cookie)),
+    };
+
+    if number_of_significant_value_digits < 0 || number_of_significant_value_digits > u8::MAX as i32 {
+        return Err(DecodeError::InvalidPayload);
+    }
+
+    let settings = HistogramSettings::new(
+        lowest_discernible_value,
+        highest_trackable_value.max(min_highest_trackable_value),
+        number_of_significant_value_digits as u8,
+    )?;
+    let max_length = (settings.counts_array_length as usize)
+        .checked_mul(word_size as usize)
+        .ok_or(DecodeError::InvalidPayload)?;
+    if let Some(payload_length) = payload_length {
+        if payload_length > max_length {
+            return Err(DecodeError::InvalidPayload);
+        }
+    }
+
+    Ok(CompressedPayloadLimit {
+        exact_length: payload_length,
+        max_length,
+    })
+}
+
+#[cfg(feature = "encoding-compression")]
+fn decode_compression_read_error(err: std::io::Error) -> DecodeError {
+    if err.kind() == ErrorKind::UnexpectedEof {
+        DecodeError::UnexpectedEof
+    } else {
+        DecodeError::Compression(err.to_string())
+    }
 }
 
 fn read_significant_value_digits(reader: &mut Reader<'_>) -> Result<u8, DecodeError> {

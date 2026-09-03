@@ -82,6 +82,9 @@ impl HistogramLayout {
         let sub_bucket_half_count_magnitude = sub_bucket_count_magnitude - 1;
         let sub_bucket_count = 1 << sub_bucket_count_magnitude;
 
+        // Java rejects layouts above bit 62 because integer histograms use a
+        // positive signed long range. Rust's u64 histograms can represent one
+        // extra bit, but Java-compatible data should stay <= i64::MAX.
         expect!(
             unit_magnitude + sub_bucket_count_magnitude > 63,
             CreationError::CantReprSigDigitsLtLowestDiscernible

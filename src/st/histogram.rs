@@ -390,7 +390,13 @@ impl<T: Counter> HistogramWithCounter<T> {
     }
 
     fn reset_max_value(&mut self, max_value: u64) {
-        self.raw_max_value = max_value | self.layout.unit_magnitude_mask;
+        // Keep the empty-sentinel special case on reset/rebuild paths; the
+        // recording-path update helper above must stay branch-free.
+        self.raw_max_value = if max_value == ORIGINAL_MAX {
+            ORIGINAL_MAX
+        } else {
+            max_value | self.layout.unit_magnitude_mask
+        };
     }
 
     fn update_min_non_zero_value(&mut self, value: u64) {
@@ -666,8 +672,16 @@ impl<T: Counter> HistogramWithCounter<T> {
             }
 
             self.total_count += observed_other_total_count;
-            self.update_max_value(other_histogram.get_max_value());
-            self.update_min_non_zero_value(other_histogram.get_min_non_zero_value());
+            // Handle sentinels here rather than adding branches to the
+            // recording-path update helpers.
+            let other_max_value = other_histogram.get_max_value();
+            if other_max_value != ORIGINAL_MAX {
+                self.update_max_value(other_max_value);
+            }
+            let other_min_non_zero_value = other_histogram.get_min_non_zero_value();
+            if other_min_non_zero_value != ORIGINAL_MIN {
+                self.update_min_non_zero_value(other_min_non_zero_value);
+            }
         } else {
             // Arrays are not a direct match so we can't just stream through and add them.
             // Instead, go through the array and add each non-zero value found at it's proper value:
