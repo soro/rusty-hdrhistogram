@@ -79,7 +79,7 @@ stored in long-lived owner structs rather than casually copying them around.
 use hdrhistogram::DoubleHistogram;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut histogram = DoubleHistogram::builder()
+    let mut histogram: DoubleHistogram = DoubleHistogram::builder()
         .significant_digits(3)
         .build()?;
     histogram.record_value(1.5)?;
@@ -140,10 +140,39 @@ Available recorder builders include:
 - `SingleWriterDoubleRecorder::builder()`
 - `SaturatingSingleWriterDoubleRecorder::builder()`
 
+The single-writer builders return two unique handles and allocate both backing
+histograms up front:
+
+```rust
+use hdrhistogram::SingleWriterRecorder;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut recorder, mut sampler) = SingleWriterRecorder::builder()
+        .significant_digits(3)
+        .build()?;
+
+    recorder.record_value(42)?;
+    let mut sample = sampler.begin_interval_sample();
+    assert_eq!(sample.snapshot().get_total_count(), 1);
+
+    recorder.record_value(84)?;
+    sample = sample.resample();
+    assert_eq!(sample.snapshot().get_total_count(), 1);
+    Ok(())
+}
+```
+
 `SingleWriterRecorder` and `SingleWriterDoubleRecorder` use plain histogram
-storage behind the recorder swap path. They support one active writer plus a
-sampling thread; concurrent writer calls are a contract violation and panic
-rather than racing the underlying histogram.
+storage. Recording requires `&mut` access to the unique writer handle; move the
+paired sampler handle to another thread for interval collection. The writer is
+not cloneable. The API does not add runtime writer-exclusion checks: bypassing
+the ownership contract with unsafe code is unsupported.
+
+Single-writer handoff uses the writer-reader phaser. The sampler swaps its
+cleared inactive buffer into the active slot and flips the phase before exposing
+the previous active buffer. Dropping a sample returns its buffer to the sampler
+for reuse. Auto-resizing buffers retain their capacity independently, so one
+buffer may expand again when it next becomes active.
 
 `FixedConcurrentHistogram` corresponds roughly to Java's `AtomicHistogram`.
 `ResizableConcurrentHistogram` corresponds roughly to Java's `ConcurrentHistogram`.
@@ -161,7 +190,7 @@ Direct concurrent histogram types live under `hdrhistogram::concurrent`:
 use hdrhistogram::concurrent::ConcurrentDoubleHistogram;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let histogram = ConcurrentDoubleHistogram::builder()
+    let histogram: ConcurrentDoubleHistogram = ConcurrentDoubleHistogram::builder()
         .significant_digits(3)
         .highest_to_lowest_value_ratio(1_024)
         .build()?;
@@ -173,9 +202,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Only one interval sample may be active for a recorder at a time. Holding an
-interval sample does not stop writers from recording into the next interval;
-resampling may wait for writer calls that were already in flight.
+Only one interval sample may be active for a recorder at a time. For
+single-writer recorders this is enforced by the sample's mutable borrow of its
+sampler handle. Holding an interval sample does not stop writers from recording
+into the next interval; resampling may wait for writer calls that were already
+in flight.
 
 Direct concurrent histograms are intended for shared recording and short-lived
 captured read views. Reset-style maintenance is an exclusive operation;
@@ -313,7 +344,8 @@ types are re-exported at the crate root for Rust-style imports:
 ```rust
 use hdrhistogram::{
     DoubleHistogram, DoubleRecorder, FixedRecorder, Histogram, HistogramSettings,
-    ResizableRecorder, SingleWriterRecorder,
+    ResizableRecorder, SingleWriterDoubleRecorder, SingleWriterDoubleSampler,
+    SingleWriterRecorder, SingleWriterSampler,
 };
 ```
 
@@ -322,6 +354,14 @@ strategies, and internal construction hooks are hidden. Most applications
 should use `Histogram`, `DoubleHistogram`, and the recorder types. Concurrent
 histogram, builder, policy, snapshot, and read-view types remain available from
 the `st` and `concurrent` modules when needed.
+
+The policy-bearing floating-point types are generic with
+`ThrowOnOverflow` as their default policy: `DoubleHistogram<P>`,
+`ConcurrentDoubleHistogram<P>`, `DoubleRecorder<P>`, and
+`SingleWriterDoubleRecorder<P>`. The `Saturating*` aliases select
+`SaturateOnOverflow`. Rust may need either a contextual type annotation (as in
+the double-histogram examples above) or an explicit `::<ThrowOnOverflow>` when
+an associated builder call does not otherwise constrain `P`.
 
 ## Iteration
 
@@ -364,15 +404,24 @@ ballpark guidance rather than a portability guarantee:
 | --- | ---: |
 | `Histogram::record_value` | 2.46 ns |
 | `FixedConcurrentHistogram::record_value` | 3.48 ns |
-| `SingleWriterRecorder::record_value` | 3.37 ns |
+| `SingleWriterRecorder::record_value` | 3.62 ns |
 | `ResizableConcurrentHistogram::record_value` | 6.94 ns |
 | `FixedRecorder::record_value` | 6.99 ns |
 | `ResizableRecorder::record_value` | 10.56 ns |
 | `DoubleHistogram::record_value` | 4.75 ns |
 | `ConcurrentDoubleHistogram::record_value` | 7.18 ns |
-| `SingleWriterDoubleRecorder::record_value` | 5.39 ns |
+| `SingleWriterDoubleRecorder::record_value` | 5.72 ns |
 | `DoubleRecorder::record_value` | 10.58 ns |
 
 Recorder paths trade a little more writer-side overhead for cheap interval
 sampling. The single-writer recorders are intended for the common case where one
 thread owns recording and another thread samples.
+
+The phaser-only single-writer refactor measured about 7.4% slower for integer
+recording and 6.1% slower for double recording than the previous CAS-based
+published snapshot. These figures use the same 30-sample, one-second warm-up,
+three-second measurement command shape described above. Quick validation also
+measured integer counted recording at 3.62 ns, coordinated-omission recording
+at 32.0 ns, periodic sampling every 1,024 records at 5.76 ns per record, and
+sampling against a continuously active writer at 2.34 µs. The corresponding
+double counted and coordinated-omission paths measured 8.28 ns and 94.7 ns.

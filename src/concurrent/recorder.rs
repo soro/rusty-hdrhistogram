@@ -1,4 +1,4 @@
-use crate::concurrent::double_histogram::ConcurrentDoubleHistogramWithPolicy;
+use crate::concurrent::double_histogram::ConcurrentDoubleHistogram;
 use crate::concurrent::interval_sample::{
     DoubleIntervalSample, FixedIntervalSample, IntervalSampleCore, ResizableIntervalSample, SingleWriterDoubleIntervalSample,
     SingleWriterIntervalSample,
@@ -8,10 +8,11 @@ use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
 use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::*;
-use crate::st::{DoubleHistogramWithPolicy, Histogram};
+use crate::st::{DoubleHistogram, Histogram};
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
@@ -52,16 +53,42 @@ pub struct ResizableRecorderBuilder {
     auto_resize: bool,
 }
 
-/// Recorder optimized for exactly one recording thread plus optional sampling.
+/// The unique recording handle for a single-writer integer recorder.
 ///
-/// Recording is kept as cheap as possible. Sampling waits for the current record
-/// operation to finish and may be delayed indefinitely by a continuously active
-/// writer; this is intentional for the single-writer variant.
+/// Recording requires mutable access to this handle. Move the corresponding
+/// [`SingleWriterSampler`] to the sampling thread when intervals are needed.
+/// The builder allocates both histogram buffers before returning the handles.
+///
+/// Recording without a mutable writer does not compile:
+///
+/// ```compile_fail
+/// use hdrhistogram::SingleWriterRecorder;
+///
+/// let (recorder, _sampler) = SingleWriterRecorder::builder().build().unwrap();
+/// recorder.record_value(42).unwrap();
+/// ```
+///
+/// The writer is deliberately not cloneable:
+///
+/// ```compile_fail
+/// use hdrhistogram::SingleWriterRecorder;
+///
+/// let (recorder, _sampler) = SingleWriterRecorder::builder().build().unwrap();
+/// let _second_writer = recorder.clone();
+/// ```
 pub struct SingleWriterRecorder {
     instance_id: usize,
-    core: SingleWriterCore<Histogram>,
-    inactive_settings: HistogramSettings,
-    inactive_integer_to_double_value_conversion_ratio: f64,
+    core: Arc<RecorderCore<Histogram>>,
+}
+
+/// The unique sampling handle paired with a [`SingleWriterRecorder`].
+///
+/// An active [`SingleWriterIntervalSample`] mutably borrows this handle, so a
+/// second sampling operation cannot begin until that sample is resampled or
+/// dropped.
+pub struct SingleWriterSampler {
+    core: Arc<RecorderCore<Histogram>>,
+    inactive_histogram: Option<Box<Histogram>>,
 }
 
 pub struct SingleWriterRecorderBuilder {
@@ -71,37 +98,43 @@ pub struct SingleWriterRecorderBuilder {
     auto_resize: bool,
 }
 
-pub type DoubleRecorder = DoubleRecorderWithPolicy<ThrowOnOverflow>;
-pub type SaturatingDoubleRecorder = DoubleRecorderWithPolicy<SaturateOnOverflow>;
-pub type SingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<ThrowOnOverflow>;
-pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<SaturateOnOverflow>;
+pub type SaturatingDoubleRecorder = DoubleRecorder<SaturateOnOverflow>;
+pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorder<SaturateOnOverflow>;
+pub type SaturatingSingleWriterDoubleSampler = SingleWriterDoubleSampler<SaturateOnOverflow>;
 
-pub struct DoubleRecorderWithPolicy<P: OverflowPolicy> {
+pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
     instance_id: usize,
-    core: RecorderCore<ConcurrentDoubleHistogramWithPolicy<P>>,
+    core: RecorderCore<ConcurrentDoubleHistogram<P>>,
 }
 
-pub struct DoubleRecorderBuilder<P: OverflowPolicy> {
+pub struct DoubleRecorderBuilder<P: OverflowPolicy = ThrowOnOverflow> {
     highest_to_lowest_value_ratio: u64,
     number_of_significant_value_digits: u8,
     auto_resize: bool,
     _policy: PhantomData<P>,
 }
 
-/// Double recorder optimized for exactly one recording thread plus optional sampling.
+/// The unique recording handle for a single-writer floating-point recorder.
 ///
-/// Recording is kept as cheap as possible. Sampling waits for the current record
-/// operation to finish and may be delayed indefinitely by a continuously active
-/// writer; this is intentional for the single-writer variant.
-pub struct SingleWriterDoubleRecorderWithPolicy<P: OverflowPolicy> {
+/// Recording requires mutable access to this handle. Move the corresponding
+/// [`SingleWriterDoubleSampler`] to the sampling thread when intervals are
+/// needed. The builder allocates both histogram buffers before returning the
+/// handles.
+pub struct SingleWriterDoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
     instance_id: usize,
-    core: SingleWriterCore<DoubleHistogramWithPolicy<P>>,
-    inactive_highest_to_lowest_value_ratio: u64,
-    inactive_number_of_significant_value_digits: u8,
-    inactive_auto_resize: bool,
+    core: Arc<RecorderCore<DoubleHistogram<P>>>,
 }
 
-pub struct SingleWriterDoubleRecorderBuilder<P: OverflowPolicy> {
+/// The unique sampling handle paired with a [`SingleWriterDoubleRecorder`].
+///
+/// Each recycled buffer retains its own expanded capacity. Sampling never
+/// reads mutable range settings from the live active histogram.
+pub struct SingleWriterDoubleSampler<P: OverflowPolicy = ThrowOnOverflow> {
+    core: Arc<RecorderCore<DoubleHistogram<P>>>,
+    inactive_histogram: Option<Box<DoubleHistogram<P>>>,
+}
+
+pub struct SingleWriterDoubleRecorderBuilder<P: OverflowPolicy = ThrowOnOverflow> {
     highest_to_lowest_value_ratio: u64,
     number_of_significant_value_digits: u8,
     auto_resize: bool,
@@ -233,14 +266,15 @@ impl SingleWriterRecorderBuilder {
         self
     }
 
-    pub fn build(self) -> Result<SingleWriterRecorder, CreationError> {
+    /// Allocate both buffers and return the unique writer and sampler handles.
+    pub fn build(self) -> Result<(SingleWriterRecorder, SingleWriterSampler), CreationError> {
         let histogram = Histogram::builder()
             .lowest_discernible_value(self.lowest_discernible_value)
             .highest_trackable_value(self.highest_trackable_value)
             .significant_digits(self.significant_value_digits)
             .auto_resize(self.auto_resize)
             .build()?;
-        Ok(SingleWriterRecorder::from_histogram(histogram))
+        SingleWriterRecorder::from_histogram(histogram)
     }
 }
 
@@ -273,13 +307,13 @@ impl<P: OverflowPolicy> DoubleRecorderBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<DoubleRecorderWithPolicy<P>, DoubleCreationError> {
-        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
+    pub fn build(self) -> Result<DoubleRecorder<P>, DoubleCreationError> {
+        let histogram = ConcurrentDoubleHistogram::<P>::builder()
             .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
             .significant_digits(self.number_of_significant_value_digits)
             .auto_resize(self.auto_resize)
             .build()?;
-        Ok(DoubleRecorderWithPolicy::from_histogram(histogram))
+        Ok(DoubleRecorder::from_histogram(histogram))
     }
 }
 
@@ -312,13 +346,14 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorderBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<SingleWriterDoubleRecorderWithPolicy<P>, DoubleCreationError> {
-        let histogram = DoubleHistogramWithPolicy::<P>::builder()
+    /// Allocate both buffers and return the unique writer and sampler handles.
+    pub fn build(self) -> Result<(SingleWriterDoubleRecorder<P>, SingleWriterDoubleSampler<P>), DoubleCreationError> {
+        let histogram = DoubleHistogram::<P>::builder()
             .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
             .significant_digits(self.number_of_significant_value_digits)
             .auto_resize(self.auto_resize)
             .build()?;
-        Ok(SingleWriterDoubleRecorderWithPolicy::from_histogram(histogram))
+        SingleWriterDoubleRecorder::from_histogram(histogram)
     }
 }
 
@@ -330,6 +365,7 @@ impl<T> RecorderCore<T> {
         }
     }
 
+    #[inline(always)]
     fn active(&self) -> *mut T {
         self.active_histogram.load(Ordering::Acquire)
     }
@@ -338,6 +374,7 @@ impl<T> RecorderCore<T> {
         self.recording_phaser.reader_lock()
     }
 
+    #[inline(always)]
     fn begin_writer_critical_section(&self) -> crate::concurrent::writer_reader_phaser::WriterCriticalSectionGuard<'_> {
         self.recording_phaser.begin_writer_critical_section()
     }
@@ -356,93 +393,6 @@ impl<T> Drop for RecorderCore<T> {
             self.recording_phaser.reader_lock().flip();
             mem::drop(Box::from_raw(self.active_histogram.load(Ordering::SeqCst)));
         }
-    }
-}
-
-struct SingleWriterCore<T> {
-    recorder: RecorderCore<T>,
-    state: AtomicUsize,
-}
-
-struct SingleWriterRecordingGuard<'a> {
-    state: &'a AtomicUsize,
-}
-
-struct SingleWriterSamplingGuard<'a> {
-    state: &'a AtomicUsize,
-}
-
-const SINGLE_WRITER_IDLE: usize = 0;
-const SINGLE_WRITER_RECORDING: usize = 1;
-const SINGLE_WRITER_SAMPLING: usize = 2;
-
-impl<T> SingleWriterCore<T> {
-    fn from_histogram(histogram: T) -> Self {
-        SingleWriterCore {
-            recorder: RecorderCore::from_histogram(histogram),
-            state: AtomicUsize::new(SINGLE_WRITER_IDLE),
-        }
-    }
-
-    fn active(&self) -> *mut T {
-        self.recorder.active()
-    }
-
-    #[inline(always)]
-    fn active_after_recording_guard(&self) -> *mut T {
-        // begin_recording's Acquire CAS synchronizes with the sampler's Release
-        // store after swap_active(), so the active pointer can be loaded relaxed.
-        self.recorder.active_histogram.load(Ordering::Relaxed)
-    }
-
-    fn reader_lock(&self) -> PhaseFlipGuard<'_> {
-        self.recorder.reader_lock()
-    }
-
-    fn swap_active(&self, inactive_histogram: *mut T) -> *mut T {
-        self.recorder.swap_active(inactive_histogram)
-    }
-
-    #[inline(always)]
-    fn begin_recording(&self) -> SingleWriterRecordingGuard<'_> {
-        loop {
-            match self
-                .state
-                .compare_exchange(SINGLE_WRITER_IDLE, SINGLE_WRITER_RECORDING, Ordering::Acquire, Ordering::Relaxed)
-            {
-                Ok(_) => return SingleWriterRecordingGuard { state: &self.state },
-                Err(SINGLE_WRITER_RECORDING) => {
-                    panic!("single-writer recorder does not support concurrent recording calls");
-                }
-                Err(SINGLE_WRITER_SAMPLING) => std::hint::spin_loop(),
-                Err(_) => unreachable!("invalid single-writer recorder state"),
-            }
-        }
-    }
-
-    fn begin_sampling(&self) -> SingleWriterSamplingGuard<'_> {
-        while self
-            .state
-            .compare_exchange(SINGLE_WRITER_IDLE, SINGLE_WRITER_SAMPLING, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            std::hint::spin_loop();
-        }
-        SingleWriterSamplingGuard { state: &self.state }
-    }
-}
-
-impl Drop for SingleWriterRecordingGuard<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        self.state.store(SINGLE_WRITER_IDLE, Ordering::Release);
-    }
-}
-
-impl Drop for SingleWriterSamplingGuard<'_> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        self.state.store(SINGLE_WRITER_IDLE, Ordering::Release);
     }
 }
 
@@ -596,110 +546,114 @@ impl SingleWriterRecorder {
         SingleWriterRecorderBuilder::new()
     }
 
-    pub fn from_histogram(mut histogram: Histogram) -> Self {
-        let inactive_settings = histogram.settings().clone();
-        let inactive_integer_to_double_value_conversion_ratio = histogram.integer_to_double_value_conversion_ratio();
+    /// Create the unique writer and sampler handles around an existing
+    /// histogram.
+    pub fn from_histogram(mut histogram: Histogram) -> Result<(Self, SingleWriterSampler), CreationError> {
+        let inactive_histogram = Box::new(histogram.empty_like_for_recorder());
         histogram.meta_data.set_start_now();
-        SingleWriterRecorder {
+        let core = Arc::new(RecorderCore::from_histogram(histogram));
+        let recorder = SingleWriterRecorder {
             instance_id: get_instance_id(),
-            core: SingleWriterCore::from_histogram(histogram),
-            inactive_settings,
-            inactive_integer_to_double_value_conversion_ratio,
+            core: Arc::clone(&core),
+        };
+        let sampler = SingleWriterSampler {
+            core,
+            inactive_histogram: Some(inactive_histogram),
+        };
+        Ok((recorder, sampler))
+    }
+
+    #[inline(always)]
+    pub fn record_value(&mut self, value: u64) -> Result<(), RecordError> {
+        unsafe {
+            // SAFETY: mutable access to the unique writer prevents another
+            // writer from mutating the active plain histogram. The phaser
+            // guard prevents the sampler from exposing or recycling the
+            // loaded pointer until this mutation has completed.
+            let _writer = self.core.begin_writer_critical_section();
+            (*self.core.active()).record_value(value)
         }
     }
 
     #[inline(always)]
-    pub fn record_value(&self, value: u64) -> Result<(), RecordError> {
+    pub fn record_value_with_count(&mut self, value: u64, count: u64) -> Result<(), RecordError> {
         unsafe {
-            let _access = self.core.begin_recording();
-            (*self.core.active_after_recording_guard()).record_value(value)
-        }
-    }
-
-    #[inline(always)]
-    pub fn record_value_with_count(&self, value: u64, count: u64) -> Result<(), RecordError> {
-        unsafe {
-            let _access = self.core.begin_recording();
-            (*self.core.active_after_recording_guard()).record_value_with_count(value, count)
+            let _writer = self.core.begin_writer_critical_section();
+            (*self.core.active()).record_value_with_count(value, count)
         }
     }
 
     #[inline]
     pub fn record_value_with_count_and_expected_interval(
-        &self,
+        &mut self,
         value: u64,
         count: u64,
         expected_interval_between_value_samples: u64,
     ) -> Result<(), RecordError> {
         unsafe {
-            let _access = self.core.begin_recording();
-            (*self.core.active_after_recording_guard()).record_value_with_count_and_expected_interval(
-                value,
-                count,
-                expected_interval_between_value_samples,
-            )
+            let _writer = self.core.begin_writer_critical_section();
+            (*self.core.active()).record_value_with_count_and_expected_interval(value, count, expected_interval_between_value_samples)
         }
     }
 
     #[inline]
-    pub fn record_value_with_expected_interval(&self, value: u64, expected_interval_between_value_samples: u64) -> Result<(), RecordError> {
+    pub fn record_value_with_expected_interval(
+        &mut self,
+        value: u64,
+        expected_interval_between_value_samples: u64,
+    ) -> Result<(), RecordError> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
-    }
-
-    /// Begin sampling an interval from this recorder.
-    ///
-    /// The returned value owns the recorder's exclusive sampling lease. The
-    /// single writer continues recording into the next interval after the swap;
-    /// resampling may briefly wait for an in-flight writer call.
-    pub fn begin_interval_sample<'a>(&'a self) -> SingleWriterIntervalSample<'a, 'a> {
-        let pfg = self.core.reader_lock();
-        let fresh_histogram = self
-            .fresh_histogram_for_inactive()
-            .expect("single-writer recorder inactive histogram settings must be reusable");
-        let sample = self.perform_interval_sample_locked(Box::into_raw(Box::new(fresh_histogram)), &pfg);
-        SingleWriterIntervalSample::new(self, sample, pfg)
-    }
-
-    fn fresh_histogram_for_inactive(&self) -> Result<Histogram, CreationError> {
-        let mut fresh = Histogram::builder()
-            .lowest_discernible_value(self.inactive_settings.lowest_discernible_value)
-            .highest_trackable_value(self.inactive_settings.highest_trackable_value)
-            .significant_digits(self.inactive_settings.number_of_significant_value_digits as u8)
-            .auto_resize(self.inactive_settings.auto_resize)
-            .build()?;
-        fresh.set_integer_to_double_value_conversion_ratio(self.inactive_integer_to_double_value_conversion_ratio);
-        Ok(fresh)
-    }
-
-    pub(in crate::concurrent) fn perform_interval_sample<'a>(
-        &self,
-        inactive_histogram: *mut Histogram,
-        flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut Histogram {
-        self.perform_interval_sample_locked(inactive_histogram, flip_guard)
-    }
-
-    fn perform_interval_sample_locked<'a>(&self, inactive_histogram: *mut Histogram, flip_guard: &PhaseFlipGuard<'a>) -> *mut Histogram {
-        let _access = self.core.begin_sampling();
-        let now = SystemTime::now();
-        unsafe { (*inactive_histogram).meta_data.set_start_timestamp(now) };
-        let active_histogram = self.core.swap_active(inactive_histogram);
-
-        flip_guard.flip();
-
-        unsafe { (*active_histogram).meta_data.set_end_timestamp(now) };
-        active_histogram
     }
 }
 
-impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
+impl SingleWriterSampler {
+    /// Begin sampling an interval from this recorder.
+    ///
+    /// The returned value borrows this unique sampler and owns the inactive
+    /// buffer until it is resampled or dropped. The writer continues recording
+    /// into the next interval after the handoff.
+    pub fn begin_interval_sample(&mut self) -> SingleWriterIntervalSample<'_> {
+        let inactive_histogram = self
+            .inactive_histogram
+            .take()
+            .expect("single-writer sampler must own exactly one inactive histogram");
+        let sample = self.perform_interval_sample(inactive_histogram);
+        SingleWriterIntervalSample::new(self, sample)
+    }
+
+    pub(in crate::concurrent) fn perform_interval_sample(&mut self, mut inactive_histogram: Box<Histogram>) -> Box<Histogram> {
+        inactive_histogram.reset();
+        let now = SystemTime::now();
+        inactive_histogram.meta_data.set_start_timestamp(now);
+
+        let flip_guard = self.core.reader_lock();
+        let active_histogram = self.core.swap_active(Box::into_raw(inactive_histogram));
+        flip_guard.flip();
+
+        // SAFETY: the pointer was formerly owned by RecorderCore. The swap
+        // removed it from the active slot, and the phase flip waited for every
+        // writer that could have loaded it before ownership is reconstructed.
+        let mut sampled_histogram = unsafe { Box::from_raw(active_histogram) };
+        sampled_histogram.meta_data.set_end_timestamp(now);
+        sampled_histogram
+    }
+
+    pub(in crate::concurrent) fn return_inactive(&mut self, histogram: Box<Histogram>) {
+        assert!(
+            self.inactive_histogram.replace(histogram).is_none(),
+            "single-writer sampler already owns an inactive histogram"
+        );
+    }
+}
+
+impl<P: OverflowPolicy> DoubleRecorder<P> {
     pub fn builder() -> DoubleRecorderBuilder<P> {
         DoubleRecorderBuilder::new()
     }
 
-    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
+    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogram<P>) -> Self {
         histogram.meta_data_mut().set_start_now();
-        DoubleRecorderWithPolicy {
+        DoubleRecorder {
             instance_id: get_instance_id(),
             core: RecorderCore::from_histogram(histogram),
         }
@@ -755,7 +709,7 @@ impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
     pub fn begin_interval_sample<'a>(&'a self) -> DoubleIntervalSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let active = unsafe { &*self.core.active() };
-        let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
+        let fresh_histogram = ConcurrentDoubleHistogram::<P>::builder()
             .highest_to_lowest_value_ratio(active.get_highest_to_lowest_value_ratio())
             .significant_digits(active.get_number_of_significant_value_digits())
             .auto_resize(active.is_auto_resize())
@@ -767,9 +721,9 @@ impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
         &self,
-        inactive_histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
+        inactive_histogram: *mut ConcurrentDoubleHistogram<P>,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut ConcurrentDoubleHistogramWithPolicy<P> {
+    ) -> *mut ConcurrentDoubleHistogram<P> {
         let now = SystemTime::now();
         unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
@@ -779,51 +733,57 @@ impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
     }
 }
 
-impl<P: OverflowPolicy> SingleWriterDoubleRecorderWithPolicy<P> {
+impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
     pub fn builder() -> SingleWriterDoubleRecorderBuilder<P> {
         SingleWriterDoubleRecorderBuilder::new()
     }
 
-    pub fn from_histogram(mut histogram: DoubleHistogramWithPolicy<P>) -> Self {
-        let inactive_highest_to_lowest_value_ratio = histogram.get_highest_to_lowest_value_ratio();
-        let inactive_number_of_significant_value_digits = histogram.get_number_of_significant_value_digits();
-        let inactive_auto_resize = histogram.is_auto_resize();
+    /// Create the unique writer and sampler handles around an existing
+    /// histogram.
+    pub fn from_histogram(mut histogram: DoubleHistogram<P>) -> Result<(Self, SingleWriterDoubleSampler<P>), DoubleCreationError> {
+        let inactive_histogram = Box::new(histogram.empty_like_for_recorder());
         histogram.meta_data_mut().set_start_now();
-        SingleWriterDoubleRecorderWithPolicy {
+        let core = Arc::new(RecorderCore::from_histogram(histogram));
+        let recorder = SingleWriterDoubleRecorder {
             instance_id: get_instance_id(),
-            core: SingleWriterCore::from_histogram(histogram),
-            inactive_highest_to_lowest_value_ratio,
-            inactive_number_of_significant_value_digits,
-            inactive_auto_resize,
+            core: Arc::clone(&core),
+        };
+        let sampler = SingleWriterDoubleSampler {
+            core,
+            inactive_histogram: Some(inactive_histogram),
+        };
+        Ok((recorder, sampler))
+    }
+
+    #[inline(always)]
+    pub fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
+        unsafe {
+            // SAFETY: mutable access to the unique writer prevents another
+            // writer from mutating the active plain histogram. The phaser
+            // guard prevents buffer reuse until this mutation completes.
+            let _writer = self.core.begin_writer_critical_section();
+            (*self.core.active()).record_value(value)
         }
     }
 
     #[inline(always)]
-    pub fn record_value(&self, value: f64) -> Result<(), RecordError> {
+    pub fn record_value_with_count(&mut self, value: f64, count: u64) -> Result<(), RecordError> {
         unsafe {
-            let _access = self.core.begin_recording();
-            (*self.core.active_after_recording_guard()).record_value(value)
-        }
-    }
-
-    #[inline(always)]
-    pub fn record_value_with_count(&self, value: f64, count: u64) -> Result<(), RecordError> {
-        unsafe {
-            let _access = self.core.begin_recording();
-            (*self.core.active_after_recording_guard()).record_value_with_count(value, count)
+            let _writer = self.core.begin_writer_critical_section();
+            (*self.core.active()).record_value_with_count(value, count)
         }
     }
 
     #[inline]
     pub fn record_value_with_count_and_expected_interval(
-        &self,
+        &mut self,
         value: f64,
         count: u64,
         expected_interval_between_value_samples: f64,
     ) -> Result<(), RecordError> {
         unsafe {
-            let _access = self.core.begin_recording();
-            let active = &mut *self.core.active_after_recording_guard();
+            let _writer = self.core.begin_writer_critical_section();
+            let active = &mut *self.core.active();
             active.record_value_with_count(value, count)?;
             if expected_interval_between_value_samples <= 0.0 {
                 return Ok(());
@@ -838,51 +798,53 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorderWithPolicy<P> {
     }
 
     #[inline]
-    pub fn record_value_with_expected_interval(&self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
+    pub fn record_value_with_expected_interval(
+        &mut self,
+        value: f64,
+        expected_interval_between_value_samples: f64,
+    ) -> Result<(), RecordError> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
+}
 
+impl<P: OverflowPolicy> SingleWriterDoubleSampler<P> {
     /// Begin sampling an interval from this recorder.
     ///
-    /// The returned value owns the recorder's exclusive sampling lease. The
-    /// single writer continues recording into the next interval after the swap;
-    /// resampling may briefly wait for an in-flight writer call.
-    pub fn begin_interval_sample<'a>(&'a self) -> SingleWriterDoubleIntervalSample<'a, 'a, P> {
-        let pfg = self.core.reader_lock();
-        let fresh_histogram = self
-            .fresh_histogram_for_inactive()
-            .expect("single-writer double recorder inactive histogram settings must be reusable");
-        let sample = self.perform_interval_sample_locked(Box::into_raw(Box::new(fresh_histogram)), &pfg);
-        SingleWriterDoubleIntervalSample::new(self, sample, pfg)
+    /// The returned value borrows this unique sampler and owns the inactive
+    /// buffer until it is resampled or dropped. The writer continues recording
+    /// into the next interval after the handoff.
+    pub fn begin_interval_sample(&mut self) -> SingleWriterDoubleIntervalSample<'_, P> {
+        let inactive_histogram = self
+            .inactive_histogram
+            .take()
+            .expect("single-writer double sampler must own exactly one inactive histogram");
+        let sample = self.perform_interval_sample(inactive_histogram);
+        SingleWriterDoubleIntervalSample::new(self, sample)
     }
 
-    fn fresh_histogram_for_inactive(&self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {
-        DoubleHistogramWithPolicy::<P>::builder()
-            .highest_to_lowest_value_ratio(self.inactive_highest_to_lowest_value_ratio)
-            .significant_digits(self.inactive_number_of_significant_value_digits)
-            .auto_resize(self.inactive_auto_resize)
-            .build()
-    }
-
-    pub(in crate::concurrent) fn perform_interval_sample<'a>(
-        &self,
-        inactive_histogram: *mut DoubleHistogramWithPolicy<P>,
-        flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut DoubleHistogramWithPolicy<P> {
-        self.perform_interval_sample_locked(inactive_histogram, flip_guard)
-    }
-
-    fn perform_interval_sample_locked<'a>(
-        &self,
-        inactive_histogram: *mut DoubleHistogramWithPolicy<P>,
-        flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut DoubleHistogramWithPolicy<P> {
-        let _access = self.core.begin_sampling();
+    pub(in crate::concurrent) fn perform_interval_sample(
+        &mut self,
+        mut inactive_histogram: Box<DoubleHistogram<P>>,
+    ) -> Box<DoubleHistogram<P>> {
+        inactive_histogram.reset();
         let now = SystemTime::now();
-        unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
-        let active_histogram = self.core.swap_active(inactive_histogram);
+        inactive_histogram.meta_data_mut().set_start_timestamp(now);
+
+        let flip_guard = self.core.reader_lock();
+        let active_histogram = self.core.swap_active(Box::into_raw(inactive_histogram));
         flip_guard.flip();
-        unsafe { (*active_histogram).meta_data_mut().set_end_timestamp(now) };
-        active_histogram
+
+        // SAFETY: the swap removed this pointer from RecorderCore ownership,
+        // and the phase flip waited for all writers that could still use it.
+        let mut sampled_histogram = unsafe { Box::from_raw(active_histogram) };
+        sampled_histogram.meta_data_mut().set_end_timestamp(now);
+        sampled_histogram
+    }
+
+    pub(in crate::concurrent) fn return_inactive(&mut self, histogram: Box<DoubleHistogram<P>>) {
+        assert!(
+            self.inactive_histogram.replace(histogram).is_none(),
+            "single-writer double sampler already owns an inactive histogram"
+        );
     }
 }

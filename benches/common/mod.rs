@@ -67,7 +67,7 @@ pub fn histogram_u32(series: LatencySeries, significant_value_digits: u8) -> His
 }
 
 pub fn double_histogram(series: LatencySeries, significant_value_digits: u8) -> DoubleHistogram {
-    let mut histogram = DoubleHistogram::builder()
+    let mut histogram: DoubleHistogram = DoubleHistogram::builder()
         .significant_digits(significant_value_digits)
         .build()
         .unwrap();

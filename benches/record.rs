@@ -13,6 +13,9 @@ use hdrhistogram::concurrent::{
 use hdrhistogram::st::{DoubleHistogram, Histogram, HistogramWithCounter, SaturatingDoubleHistogram};
 use rand::Rng;
 use std::hint::black_box;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
 
 const MOSTLY_CLAMPED_VALUE_COUNT: usize = 1024;
 const JAVA_MAX_HISTOGRAM_VALUE: u64 = i64::MAX as u64;
@@ -65,12 +68,13 @@ fn resizable_recorder() -> ResizableRecorder {
 }
 
 fn single_writer_recorder() -> SingleWriterRecorder {
-    SingleWriterRecorder::builder()
+    let (recorder, _sampler) = SingleWriterRecorder::builder()
         .lowest_discernible_value(1)
         .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
         .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
         .build()
-        .unwrap()
+        .unwrap();
+    recorder
 }
 
 fn double_recorder() -> DoubleRecorder {
@@ -90,19 +94,21 @@ fn saturating_double_recorder() -> SaturatingDoubleRecorder {
 }
 
 fn single_writer_double_recorder() -> SingleWriterDoubleRecorder {
-    SingleWriterDoubleRecorder::builder()
+    let (recorder, _sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
         .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
         .build()
-        .unwrap()
+        .unwrap();
+    recorder
 }
 
 fn saturating_single_writer_double_recorder() -> SaturatingSingleWriterDoubleRecorder {
-    SaturatingSingleWriterDoubleRecorder::builder()
+    let (recorder, _sampler) = SaturatingSingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
         .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
         .build()
-        .unwrap()
+        .unwrap();
+    recorder
 }
 
 fn record_value_histogram_u64(c: &mut Criterion) {
@@ -211,7 +217,7 @@ fn record_value_resizable_recorder(c: &mut Criterion) {
 
 fn record_value_single_writer_recorder(c: &mut Criterion) {
     c.bench_function("record_value_single_writer_recorder", |b| {
-        let recorder = single_writer_recorder();
+        let mut recorder = single_writer_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -221,9 +227,84 @@ fn record_value_single_writer_recorder(c: &mut Criterion) {
     });
 }
 
+fn record_value_with_count_single_writer_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_with_count_single_writer_recorder", |b| {
+        let mut recorder = single_writer_recorder();
+        let mut i = 0_u64;
+
+        b.iter(|| {
+            let value = black_box(common::next_recording_value(&mut i));
+            recorder.record_value_with_count(value, black_box(3)).unwrap();
+        })
+    });
+}
+
+fn record_value_with_expected_interval_single_writer_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_with_expected_interval_single_writer_recorder", |b| {
+        let mut recorder = single_writer_recorder();
+        let mut i = 0_u64;
+
+        b.iter(|| {
+            let value = black_box(common::next_recording_value(&mut i));
+            recorder.record_value_with_expected_interval(value, black_box(1_000)).unwrap();
+        })
+    });
+}
+
+fn record_value_with_periodic_sampling_single_writer_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_with_periodic_sampling_single_writer_recorder", |b| {
+        let (mut recorder, mut sampler) = SingleWriterRecorder::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
+        let mut i = 0_u64;
+        let mut records_since_sample = 0_u16;
+
+        b.iter(|| {
+            let value = black_box(common::next_recording_value(&mut i));
+            recorder.record_value(value).unwrap();
+            records_since_sample += 1;
+            if records_since_sample == 1_024 {
+                let sample = sampler.begin_interval_sample();
+                black_box(sample.snapshot().get_total_count());
+                records_since_sample = 0;
+            }
+        })
+    });
+}
+
+fn sample_single_writer_recorder_under_active_writer(c: &mut Criterion) {
+    c.bench_function("sample_single_writer_recorder_under_active_writer", |b| {
+        let (mut recorder, mut sampler) = SingleWriterRecorder::builder()
+            .lowest_discernible_value(1)
+            .highest_trackable_value(common::HIGHEST_TRACKABLE_VALUE)
+            .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
+            .build()
+            .unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let writer_done = Arc::clone(&done);
+        let writer = thread::spawn(move || {
+            let mut i = 0_u64;
+            while !writer_done.load(Ordering::Acquire) {
+                recorder.record_value(common::next_recording_value(&mut i)).unwrap();
+            }
+        });
+
+        b.iter(|| {
+            let sample = sampler.begin_interval_sample();
+            black_box(sample.snapshot().get_total_count());
+        });
+
+        done.store(true, Ordering::Release);
+        writer.join().unwrap();
+    });
+}
+
 fn record_value_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_double_histogram", |b| {
-        let mut histogram = DoubleHistogram::builder()
+        let mut histogram: DoubleHistogram = DoubleHistogram::builder()
             .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
             .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
             .build()
@@ -286,7 +367,7 @@ fn record_mostly_clamped_saturating_double_histogram(c: &mut Criterion) {
 
 fn record_value_concurrent_double_histogram(c: &mut Criterion) {
     c.bench_function("record_value_concurrent_double_histogram", |b| {
-        let histogram = ConcurrentDoubleHistogram::builder()
+        let histogram: ConcurrentDoubleHistogram = ConcurrentDoubleHistogram::builder()
             .highest_to_lowest_value_ratio(common::HIGHEST_TRACKABLE_VALUE)
             .significant_digits(common::SIGNIFICANT_VALUE_DIGITS)
             .build()
@@ -396,7 +477,7 @@ fn record_mostly_clamped_saturating_double_recorder(c: &mut Criterion) {
 
 fn record_value_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_single_writer_double_recorder", |b| {
-        let recorder = single_writer_double_recorder();
+        let mut recorder = single_writer_double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -406,9 +487,33 @@ fn record_value_single_writer_double_recorder(c: &mut Criterion) {
     });
 }
 
+fn record_value_with_count_single_writer_double_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_with_count_single_writer_double_recorder", |b| {
+        let mut recorder = single_writer_double_recorder();
+        let mut i = 0_u64;
+
+        b.iter(|| {
+            let value = black_box(common::next_recording_value(&mut i) as f64);
+            recorder.record_value_with_count(value, black_box(3)).unwrap();
+        })
+    });
+}
+
+fn record_value_with_expected_interval_single_writer_double_recorder(c: &mut Criterion) {
+    c.bench_function("record_value_with_expected_interval_single_writer_double_recorder", |b| {
+        let mut recorder = single_writer_double_recorder();
+        let mut i = 0_u64;
+
+        b.iter(|| {
+            let value = black_box(common::next_recording_value(&mut i) as f64);
+            recorder.record_value_with_expected_interval(value, black_box(1_000.0)).unwrap();
+        })
+    });
+}
+
 fn record_value_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_value_saturating_single_writer_double_recorder", |b| {
-        let recorder = saturating_single_writer_double_recorder();
+        let mut recorder = saturating_single_writer_double_recorder();
         let mut i = 0_u64;
 
         b.iter(|| {
@@ -420,7 +525,7 @@ fn record_value_saturating_single_writer_double_recorder(c: &mut Criterion) {
 
 fn record_out_of_range_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_out_of_range_saturating_single_writer_double_recorder", |b| {
-        let recorder = saturating_single_writer_double_recorder();
+        let mut recorder = saturating_single_writer_double_recorder();
 
         b.iter(|| {
             recorder.record_value(black_box(f64::MAX)).unwrap();
@@ -430,7 +535,7 @@ fn record_out_of_range_saturating_single_writer_double_recorder(c: &mut Criterio
 
 fn record_mostly_clamped_saturating_single_writer_double_recorder(c: &mut Criterion) {
     c.bench_function("record_mostly_clamped_saturating_single_writer_double_recorder", |b| {
-        let recorder = saturating_single_writer_double_recorder();
+        let mut recorder = saturating_single_writer_double_recorder();
         let values = mostly_clamped_double_values();
         let mut i = 0_usize;
 
@@ -524,6 +629,10 @@ criterion_group!(
     record_value_fixed_recorder,
     record_value_resizable_recorder,
     record_value_single_writer_recorder,
+    record_value_with_count_single_writer_recorder,
+    record_value_with_expected_interval_single_writer_recorder,
+    record_value_with_periodic_sampling_single_writer_recorder,
+    sample_single_writer_recorder_under_active_writer,
     record_value_double_histogram,
     record_value_saturating_double_histogram,
     record_out_of_range_saturating_double_histogram,
@@ -537,6 +646,8 @@ criterion_group!(
     record_out_of_range_saturating_double_recorder,
     record_mostly_clamped_saturating_double_recorder,
     record_value_single_writer_double_recorder,
+    record_value_with_count_single_writer_double_recorder,
+    record_value_with_expected_interval_single_writer_double_recorder,
     record_value_saturating_single_writer_double_recorder,
     record_out_of_range_saturating_single_writer_double_recorder,
     record_mostly_clamped_saturating_single_writer_double_recorder,

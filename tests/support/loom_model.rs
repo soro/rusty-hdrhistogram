@@ -135,6 +135,92 @@ impl ModelRecorder {
     }
 }
 
+struct ModelSplitRecorderCore {
+    phaser: ModelPhaser,
+    active: AtomicUsize,
+    counts: [AtomicUsize; 2],
+}
+
+pub struct ModelSingleWriter {
+    core: Arc<ModelSplitRecorderCore>,
+}
+
+pub struct ModelSingleWriterSampler {
+    core: Arc<ModelSplitRecorderCore>,
+    inactive: Option<usize>,
+}
+
+pub struct ModelSingleWriterSample<'a> {
+    sampler: &'a mut ModelSingleWriterSampler,
+    sampled: Option<usize>,
+}
+
+pub fn model_single_writer_handles() -> (ModelSingleWriter, ModelSingleWriterSampler) {
+    let core = Arc::new(ModelSplitRecorderCore {
+        phaser: ModelPhaser::new(),
+        active: AtomicUsize::new(0),
+        counts: [AtomicUsize::new(0), AtomicUsize::new(0)],
+    });
+    (
+        ModelSingleWriter { core: core.clone() },
+        ModelSingleWriterSampler { core, inactive: Some(1) },
+    )
+}
+
+impl ModelSingleWriter {
+    pub fn record_one(&mut self) {
+        let _guard = self.core.phaser.begin_writer_critical_section();
+        thread::yield_now();
+        let active = self.core.active.load(Ordering::Acquire);
+        thread::yield_now();
+        self.core.counts[active].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl ModelSingleWriterSampler {
+    pub fn begin_interval_sample(&mut self) -> ModelSingleWriterSample<'_> {
+        let inactive = self.inactive.take().expect("sampler must own an inactive buffer");
+        let sampled = self.swap_and_flip(inactive);
+        ModelSingleWriterSample {
+            sampler: self,
+            sampled: Some(sampled),
+        }
+    }
+
+    fn swap_and_flip(&self, inactive: usize) -> usize {
+        self.core.counts[inactive].store(0, Ordering::Relaxed);
+        let guard = self.core.phaser.reader_lock();
+        let sampled = self.core.active.swap(inactive, Ordering::SeqCst);
+        guard.flip();
+        sampled
+    }
+
+    pub fn total_count(&self) -> usize {
+        self.core.counts[0].load(Ordering::Relaxed) + self.core.counts[1].load(Ordering::Relaxed)
+    }
+}
+
+impl ModelSingleWriterSample<'_> {
+    pub fn count(&self) -> usize {
+        let sampled = self.sampled.expect("sample must own a buffer");
+        self.sampler.core.counts[sampled].load(Ordering::Relaxed)
+    }
+
+    pub fn resample(mut self) -> Self {
+        let inactive = self.sampled.take().expect("sample must own a buffer");
+        self.sampled = Some(self.sampler.swap_and_flip(inactive));
+        self
+    }
+}
+
+impl Drop for ModelSingleWriterSample<'_> {
+    fn drop(&mut self) {
+        if let Some(sampled) = self.sampled.take() {
+            assert!(self.sampler.inactive.replace(sampled).is_none());
+        }
+    }
+}
+
 pub struct ModelResizableConcurrentHistogram {
     phaser: ModelPhaser,
     active: AtomicUsize,

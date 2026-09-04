@@ -42,6 +42,7 @@ impl WriterReaderPhaser {
         }
     }
 
+    #[inline(always)]
     pub fn begin_writer_critical_section<'a>(&'a self) -> WriterCriticalSectionGuard<'a> {
         let critical_value = self.start_epoch.fetch_add(1, Ordering::Acquire);
         if critical_value < 0 {
@@ -76,6 +77,7 @@ impl<'a> WriterCriticalSectionGuard<'a> {
 
 impl<'a> Drop for WriterCriticalSectionGuard<'a> {
     #[allow(unused_results)]
+    #[inline(always)]
     fn drop(&mut self) {
         self.epoch.fetch_add(1, Ordering::Release);
     }

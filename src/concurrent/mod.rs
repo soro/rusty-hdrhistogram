@@ -17,16 +17,16 @@ mod static_histogram;
 pub(crate) mod writer_reader_phaser;
 
 pub use self::double_histogram::{
-    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramBuilder, ConcurrentDoubleHistogramWithPolicy, ConcurrentDoubleReadView,
-    ConcurrentDoubleSnapshot, SaturatingConcurrentDoubleHistogram,
+    ConcurrentDoubleHistogram, ConcurrentDoubleHistogramBuilder, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot,
+    SaturatingConcurrentDoubleHistogram,
 };
 pub use self::interval_sample::{
     DoubleIntervalSample, FixedIntervalSample, ResizableIntervalSample, SingleWriterDoubleIntervalSample, SingleWriterIntervalSample,
 };
 pub use self::recorder::{
-    DoubleRecorder, DoubleRecorderBuilder, DoubleRecorderWithPolicy, FixedRecorder, FixedRecorderBuilder, ResizableRecorder,
-    ResizableRecorderBuilder, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder,
-    SingleWriterDoubleRecorderBuilder, SingleWriterDoubleRecorderWithPolicy, SingleWriterRecorder, SingleWriterRecorderBuilder,
+    DoubleRecorder, DoubleRecorderBuilder, FixedRecorder, FixedRecorderBuilder, ResizableRecorder, ResizableRecorderBuilder,
+    SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder, SaturatingSingleWriterDoubleSampler, SingleWriterDoubleRecorder,
+    SingleWriterDoubleRecorderBuilder, SingleWriterDoubleSampler, SingleWriterRecorder, SingleWriterRecorderBuilder, SingleWriterSampler,
 };
 pub(crate) use self::resizable_histogram::ResizableStructuralMutation;
 pub use self::resizable_histogram::{ResizableConcurrentHistogram, ResizableConcurrentHistogramBuilder, ResizableConcurrentReadView};

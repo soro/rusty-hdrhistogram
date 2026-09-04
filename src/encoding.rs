@@ -8,7 +8,7 @@ use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 #[cfg(feature = "encoding-compression")]
 use crate::core::HistogramSettings;
 use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, ReadableHistogram};
-use crate::st::{DoubleHistogram, DoubleHistogramWithPolicy, Histogram};
+use crate::st::{DoubleHistogram, Histogram};
 
 pub use crate::core::{EncodableHistogram, OverflowPolicy};
 
@@ -677,7 +677,7 @@ impl<W: Write> HistogramLogWriter<W> {
 
     pub fn write_double_interval<P: OverflowPolicy>(
         &mut self,
-        histogram: &DoubleHistogramWithPolicy<P>,
+        histogram: &DoubleHistogram<P>,
         start_timestamp_sec: f64,
         end_timestamp_sec: f64,
     ) -> Result<(), EncodeError> {
@@ -913,7 +913,7 @@ fn encode_double_histogram_v2_from_integer<H: EncodableHistogram>(
     Ok(encoded)
 }
 
-pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_v2_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -1014,7 +1014,7 @@ fn encode_double_histogram_compressed_from_integer<H: EncodableHistogram>(
 }
 
 #[cfg(feature = "encoding-compression")]
-pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -1060,7 +1060,7 @@ fn encode_double_histogram_compressed_with_level_from_integer<H: EncodableHistog
 
 #[cfg(feature = "encoding-compression")]
 pub fn encode_double_histogram_compressed_with_level<P: OverflowPolicy>(
-    histogram: &DoubleHistogramWithPolicy<P>,
+    histogram: &DoubleHistogram<P>,
     compression_level: u32,
 ) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_with_level_from_integer(
@@ -1128,7 +1128,7 @@ pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram, DecodeError> 
 }
 
 #[cfg(feature = "encoding-base64")]
-pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<String, EncodeError> {
+pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<String, EncodeError> {
     Ok(BASE64_STANDARD.encode(encode_double_histogram_compressed(histogram)?))
 }
 
@@ -1205,7 +1205,7 @@ pub fn encode_histogram_log_line_with_max_value_unit_ratio<H: EncodableHistogram
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
-    histogram: &DoubleHistogramWithPolicy<P>,
+    histogram: &DoubleHistogram<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
 ) -> Result<String, EncodeError> {
@@ -1219,7 +1219,7 @@ pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line_with_max_value_unit_ratio<P: OverflowPolicy>(
-    histogram: &DoubleHistogramWithPolicy<P>,
+    histogram: &DoubleHistogram<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
     max_value_unit_ratio: f64,

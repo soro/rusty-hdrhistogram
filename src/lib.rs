@@ -40,10 +40,11 @@ pub mod st;
 
 pub use crate::concurrent::{
     DoubleRecorder, FixedRecorder, ResizableRecorder, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder,
-    SingleWriterDoubleRecorder, SingleWriterRecorder,
+    SaturatingSingleWriterDoubleSampler, SingleWriterDoubleRecorder, SingleWriterDoubleSampler, SingleWriterRecorder, SingleWriterSampler,
 };
 pub use crate::core::{
-    CreationError, DoubleCreationError, HistogramMetaData, HistogramSettings, RecordError, ShiftError, SubtractionError,
+    CreationError, DoubleCreationError, HistogramMetaData, HistogramSettings, OverflowPolicy, RecordError, SaturateOnOverflow, ShiftError,
+    SubtractionError, ThrowOnOverflow,
 };
 pub use crate::iteration::IterationError;
 pub use crate::st::{DoubleHistogram, Histogram, SaturatingDoubleHistogram};

@@ -361,6 +361,27 @@ impl<T: Counter> HistogramWithCounter<T> {
         })
     }
 
+    /// Construct an empty histogram with the same current storage model.
+    ///
+    /// This is used while creating single-writer recorder handles, before the
+    /// source histogram is published to another thread. It deliberately copies
+    /// the current backing capacity and conversion metadata without copying any
+    /// counts or interval metadata.
+    pub(crate) fn empty_like_for_recorder(&self) -> Self {
+        HistogramWithCounter {
+            meta_data: HistogramMetaData::new(),
+            layout: self.layout.clone(),
+            auto_resize: self.auto_resize,
+            raw_max_value: ORIGINAL_MAX,
+            raw_min_non_zero_value: ORIGINAL_MIN,
+            total_count: 0,
+            normalizing_index_offset: self.normalizing_index_offset,
+            integer_to_double_value_conversion_ratio: self.integer_to_double_value_conversion_ratio,
+            double_to_integer_value_conversion_ratio: self.double_to_integer_value_conversion_ratio,
+            counts: BackingArray::new(self.counts.metadata()),
+        }
+    }
+
     fn add_to_count_at_index(&mut self, idx: u32, count: T) {
         let normalized_index = self.normalize_index(idx);
         // Java-compatible unchecked count arithmetic; callers must stay within the counter capacity.

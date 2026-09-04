@@ -3,7 +3,7 @@ use crate::concurrent::{
 };
 use crate::core::constants::ORIGINAL_MIN;
 use crate::core::readable_histogram::ReadableHistogram;
-use crate::core::RecordError;
+use crate::core::{RecordError, ThrowOnOverflow};
 use crate::iteration::IterationError;
 use parking_lot::RwLock;
 use rand::rngs::StdRng;
@@ -100,7 +100,7 @@ fn zero_only_shift_updates_active_ratio() {
 
 #[test]
 fn concurrent_double_empty_range_shift_publishes_conversion_ratio() {
-    let histogram = ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
 
     succ!(histogram.record_value(1.0));
 
@@ -112,7 +112,7 @@ fn concurrent_double_empty_range_shift_publishes_conversion_ratio() {
 
 #[test]
 fn concurrent_double_zero_only_range_shift_publishes_conversion_ratio() {
-    let histogram = ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
+    let histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::with_highest_to_lowest_value_ratio(1024, 2).unwrap();
 
     succ!(histogram.record_value(0.0));
     succ!(histogram.record_value(1.0));
@@ -147,7 +147,7 @@ fn saturating_concurrent_double_clamps_counted_out_of_range_values() {
 fn concurrent_double_range_shift_publication_under_writers() {
     const THREADS: usize = 4;
     const ITERATIONS: usize = 2_000;
-    let histogram = Arc::new(ConcurrentDoubleHistogram::new(2).unwrap());
+    let histogram = Arc::new(ConcurrentDoubleHistogram::<ThrowOnOverflow>::new(2).unwrap());
     let ready = Arc::new(Barrier::new(THREADS + 1));
     let mut handles = Vec::with_capacity(THREADS);
 
@@ -194,7 +194,7 @@ fn resizable_read_view_iteration_reports_concurrent_modification() {
 
 #[test]
 fn concurrent_double_read_view_iteration_reports_concurrent_modification() {
-    let histogram = ConcurrentDoubleHistogram::new(2).unwrap();
+    let histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::new(2).unwrap();
     succ!(histogram.record_value(1.0));
 
     let view = histogram.read_view();
@@ -206,7 +206,7 @@ fn concurrent_double_read_view_iteration_reports_concurrent_modification() {
 
 #[test]
 fn concurrent_double_try_get_mean_reports_concurrent_modification() {
-    let histogram = ConcurrentDoubleHistogram::new(2).unwrap();
+    let histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::new(2).unwrap();
     succ!(histogram.record_value(1.0));
 
     let view = histogram.read_view();
@@ -285,7 +285,7 @@ fn concurrent_clear_counts_preserves_empty_max_sentinel_for_coarse_layouts() {
 
 #[test]
 fn concurrent_double_reset_clears_metadata() {
-    let mut histogram = ConcurrentDoubleHistogram::builder()
+    let mut histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -307,7 +307,7 @@ fn concurrent_double_reset_clears_metadata() {
 
 #[test]
 fn concurrent_double_read_view_settings_preserve_auto_resize_flag() {
-    let histogram = ConcurrentDoubleHistogram::builder()
+    let histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .auto_resize(false)

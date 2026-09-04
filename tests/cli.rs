@@ -66,7 +66,7 @@ fn tagged_log() -> String {
 }
 
 fn double_log() -> String {
-    let mut histogram = DoubleHistogram::builder().significant_digits(3).build().unwrap();
+    let mut histogram: DoubleHistogram = DoubleHistogram::builder().significant_digits(3).build().unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
     format!(

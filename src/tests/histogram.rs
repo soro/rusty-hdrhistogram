@@ -1,3 +1,4 @@
+use crate::core::constants::ORIGINAL_MIN;
 use crate::core::{Counter, RecordError, SubtractionError};
 use crate::st::{static_histogram_counts_array_length, Histogram, HistogramWithCounter, StaticHistogramWithCounter};
 use crate::tests::consts::*;
@@ -57,6 +58,35 @@ fn builder_defaults_to_u64_and_auto_resize() {
 
     succ!(histogram.record_value(1_000));
     assert_eq!(Some(1), histogram.get_count_at_value(1_000));
+}
+
+#[test]
+fn empty_like_for_recorder_preserves_storage_model_without_counts() {
+    let mut source = Histogram::builder()
+        .lowest_discernible_value(8)
+        .highest_trackable_value(16)
+        .significant_digits(2)
+        .auto_resize(true)
+        .build()
+        .unwrap();
+    source.set_integer_to_double_value_conversion_ratio(0.25);
+    source.record_value(1_000_000).unwrap();
+    source.meta_data.set_tag_string("source".to_string());
+
+    let empty = source.empty_like_for_recorder();
+
+    assert_eq!(source.settings(), empty.settings());
+    assert_eq!(source.counts_array_length(), empty.counts_array_length());
+    assert_eq!(
+        source.integer_to_double_value_conversion_ratio(),
+        empty.integer_to_double_value_conversion_ratio()
+    );
+    assert_eq!(0, empty.get_total_count());
+    assert_eq!(0, empty.get_max_value());
+    assert_eq!(ORIGINAL_MIN, empty.get_min_non_zero_value());
+    assert!(empty.meta_data.tag.is_none());
+    assert!(empty.meta_data.start_timestamp.is_none());
+    assert!(empty.meta_data.end_timestamp.is_none());
 }
 
 #[test]

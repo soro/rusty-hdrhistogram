@@ -1,5 +1,5 @@
 use crate::concurrent::{ConcurrentDoubleHistogram, SaturatingConcurrentDoubleHistogram};
-use crate::core::{DoubleCreationError, RecordError};
+use crate::core::{DoubleCreationError, RecordError, ThrowOnOverflow};
 use crate::st::{DoubleHistogram, SaturatingDoubleHistogram};
 
 const TRACKABLE_VALUE_RANGE_SIZE: u64 = 3600 * 1000 * 1000;
@@ -8,7 +8,7 @@ const TEST_VALUE_LEVEL: f64 = 4.0;
 
 #[test]
 fn double_histogram_builders_construct_expected_variants() {
-    let mut histogram = DoubleHistogram::builder()
+    let mut histogram: DoubleHistogram = DoubleHistogram::builder()
         .significant_digits(3)
         .highest_to_lowest_value_ratio(1_024)
         .auto_resize(true)
@@ -17,13 +17,41 @@ fn double_histogram_builders_construct_expected_variants() {
     succ!(histogram.record_value(42.0));
     assert_eq!(1, histogram.get_total_count());
 
-    let concurrent = ConcurrentDoubleHistogram::builder()
+    let concurrent: ConcurrentDoubleHistogram = ConcurrentDoubleHistogram::builder()
         .significant_digits(3)
         .highest_to_lowest_value_ratio(1_024)
         .build()
         .unwrap();
     succ!(concurrent.record_value(42.0));
     assert_eq!(1, concurrent.get_total_count());
+}
+
+#[test]
+fn double_empty_like_for_recorder_preserves_capacity_and_resets_range() {
+    let mut source = DoubleHistogram::<ThrowOnOverflow>::builder()
+        .significant_digits(2)
+        .highest_to_lowest_value_ratio(1_024)
+        .auto_resize(true)
+        .build()
+        .unwrap();
+    source.record_value(1.0).unwrap();
+    source.record_value(1_000_000.0).unwrap();
+    assert!(source.get_highest_to_lowest_value_ratio() > 1_024);
+
+    let empty = source.empty_like_for_recorder();
+
+    assert_eq!(source.counts_array_length(), empty.counts_array_length());
+    assert_eq!(
+        source.get_highest_to_lowest_value_ratio(),
+        empty.get_highest_to_lowest_value_ratio()
+    );
+    assert_eq!(
+        source.get_number_of_significant_value_digits(),
+        empty.get_number_of_significant_value_digits()
+    );
+    assert_eq!(source.is_auto_resize(), empty.is_auto_resize());
+    assert_eq!(0, empty.get_total_count());
+    assert_eq!(2.0_f64.powi(800), empty.get_current_lowest_trackable_non_zero_value());
 }
 
 trait TestDoubleHistogram: Sized {
@@ -61,13 +89,16 @@ trait TestDoubleHistogram: Sized {
 
 impl TestDoubleHistogram for DoubleHistogram {
     fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
-        DoubleHistogram::new(number_of_significant_value_digits)
+        DoubleHistogram::<ThrowOnOverflow>::new(number_of_significant_value_digits)
     }
     fn with_highest_to_lowest_value_ratio(
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {
-        DoubleHistogram::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+        DoubleHistogram::<ThrowOnOverflow>::with_highest_to_lowest_value_ratio(
+            highest_to_lowest_value_ratio,
+            number_of_significant_value_digits,
+        )
     }
     fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
         DoubleHistogram::record_value(self, value)
@@ -148,13 +179,16 @@ impl TestDoubleHistogram for DoubleHistogram {
 
 impl TestDoubleHistogram for ConcurrentDoubleHistogram {
     fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
-        ConcurrentDoubleHistogram::new(number_of_significant_value_digits)
+        ConcurrentDoubleHistogram::<ThrowOnOverflow>::new(number_of_significant_value_digits)
     }
     fn with_highest_to_lowest_value_ratio(
         highest_to_lowest_value_ratio: u64,
         number_of_significant_value_digits: u8,
     ) -> Result<Self, DoubleCreationError> {
-        ConcurrentDoubleHistogram::with_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+        ConcurrentDoubleHistogram::<ThrowOnOverflow>::with_highest_to_lowest_value_ratio(
+            highest_to_lowest_value_ratio,
+            number_of_significant_value_digits,
+        )
     }
     fn record_value(&mut self, value: f64) -> Result<(), RecordError> {
         ConcurrentDoubleHistogram::record_value(self, value)

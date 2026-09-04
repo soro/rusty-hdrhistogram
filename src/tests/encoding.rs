@@ -1,5 +1,6 @@
 use crate::concurrent::{DoubleRecorder, ResizableConcurrentHistogram};
 use crate::core::histogram_settings::{HistogramSettings, V2_ENCODING_HEADER_SIZE, V2_ENCODING_MAX_WORD_SIZE_IN_BYTES};
+use crate::core::ThrowOnOverflow;
 use crate::encoding::*;
 use crate::st::{DoubleHistogram, Histogram};
 #[cfg(feature = "encoding-compression")]
@@ -116,7 +117,7 @@ fn concurrent_histogram_v2_encoding_uses_read_view() {
 
 #[test]
 fn double_histogram_v2_roundtrip_preserves_counts() {
-    let mut histogram = DoubleHistogram::new(3).unwrap();
+    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
     histogram.record_value_with_count(128.0, 3).unwrap();
@@ -134,7 +135,7 @@ fn double_histogram_v2_roundtrip_preserves_counts() {
 
 #[test]
 fn concurrent_double_snapshot_v2_roundtrip_preserves_counts() {
-    let recorder = DoubleRecorder::builder()
+    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -228,7 +229,7 @@ fn compressed_frame(cookie: u32, compressed: &[u8]) -> Vec<u8> {
 #[cfg(feature = "encoding-compression")]
 #[test]
 fn compressed_double_histogram_roundtrip_preserves_counts() {
-    let mut histogram = DoubleHistogram::new(3).unwrap();
+    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
     histogram.record_value_with_count(2.0, 3).unwrap();
     histogram.record_value_with_count(16.0, 4).unwrap();
 
@@ -396,7 +397,7 @@ fn histogram_log_report_generates_interval_and_percentile_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
-    let mut histogram = DoubleHistogram::new(3).unwrap();
+    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
 
@@ -421,7 +422,7 @@ fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn double_histogram_log_line_roundtrip_preserves_metadata_and_counts() {
-    let mut histogram = DoubleHistogram::new(3).unwrap();
+    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.meta_data_mut().set_tag_string("phase-a".to_string());
 
@@ -649,7 +650,7 @@ fn histogram_log_report_rejects_invalid_config() {
 fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
     use crate::concurrent::ConcurrentDoubleHistogram;
 
-    let mut histogram = ConcurrentDoubleHistogram::builder()
+    let mut histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -681,7 +682,7 @@ fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_writer_accepts_concurrent_double_snapshot() {
-    let recorder = DoubleRecorder::builder()
+    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -708,7 +709,7 @@ fn histogram_log_writer_accepts_concurrent_double_snapshot() {
 fn histogram_log_report_rejects_mixed_integer_and_double_logs() {
     let mut integer_histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     integer_histogram.record_value(100).unwrap();
-    let mut double_histogram = DoubleHistogram::new(2).unwrap();
+    let mut double_histogram = DoubleHistogram::<ThrowOnOverflow>::new(2).unwrap();
     double_histogram.record_value(1.5).unwrap();
 
     let log = format!(

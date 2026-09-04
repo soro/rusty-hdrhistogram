@@ -3,7 +3,7 @@ mod loom_model;
 
 use loom::sync::atomic::Ordering;
 use loom::thread;
-use loom_model::{arc, atomic_usize, run_model, spawn, ModelRecorder};
+use loom_model::{arc, atomic_usize, model_single_writer_handles, run_model, spawn, ModelRecorder};
 
 #[test]
 fn resample_never_exposes_a_histogram_still_mutated_by_old_phase_writers() {
@@ -68,5 +68,28 @@ fn resample_publishes_cleared_inactive_histogram_to_new_writers() {
         writer.join().unwrap();
 
         assert_eq!(1, recorder.count(1));
+    });
+}
+
+#[test]
+fn single_writer_split_keeps_sample_stable_and_recycles_on_drop() {
+    run_model(|| {
+        let (mut writer_handle, mut sampler_handle) = model_single_writer_handles();
+
+        let writer = spawn(move || {
+            writer_handle.record_one();
+        });
+
+        let first_sample = sampler_handle.begin_interval_sample();
+        let first_count = first_sample.count();
+        thread::yield_now();
+        writer.join().unwrap();
+        assert_eq!(first_count, first_sample.count());
+        drop(first_sample);
+
+        let second_sample = sampler_handle.begin_interval_sample();
+        let second_count = second_sample.count();
+        assert_eq!(1, first_count + second_count);
+        drop(second_sample);
     });
 }

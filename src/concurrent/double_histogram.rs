@@ -77,7 +77,7 @@ fn derive_integer_value_range(external_ratio: u64, significant_value_digits: u8)
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
-pub struct ConcurrentDoubleHistogramWithPolicy<P: OverflowPolicy> {
+pub struct ConcurrentDoubleHistogram<P: OverflowPolicy = ThrowOnOverflow> {
     integer_histogram: ResizableConcurrentHistogram,
     configured_highest_to_lowest_value_ratio: AtomicU64,
     current_lowest_value_in_auto_range: AtomicU64,
@@ -94,7 +94,7 @@ pub struct ConcurrentDoubleHistogramWithPolicy<P: OverflowPolicy> {
 /// Builders default to three decimal significant digits. Use
 /// [`significant_digits`](Self::significant_digits) to choose a different
 /// precision.
-pub struct ConcurrentDoubleHistogramBuilder<P: OverflowPolicy> {
+pub struct ConcurrentDoubleHistogramBuilder<P: OverflowPolicy = ThrowOnOverflow> {
     highest_to_lowest_value_ratio: u64,
     number_of_significant_value_digits: u8,
     auto_resize: bool,
@@ -130,8 +130,8 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<ConcurrentDoubleHistogramWithPolicy<P>, DoubleCreationError> {
-        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
+    pub fn build(self) -> Result<ConcurrentDoubleHistogram<P>, DoubleCreationError> {
+        let histogram = ConcurrentDoubleHistogram::<P>::with_highest_to_lowest_value_ratio(
             self.highest_to_lowest_value_ratio,
             self.number_of_significant_value_digits,
         )?;
@@ -140,7 +140,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramBuilder<P> {
     }
 }
 
-/// A structurally stable read view of a [`ConcurrentDoubleHistogramWithPolicy`].
+/// A structurally stable read view of a [`ConcurrentDoubleHistogram`].
 ///
 /// The view captures double range metadata together with an underlying integer
 /// read view from one structural epoch. Ordinary recording can still update
@@ -161,11 +161,10 @@ pub struct ConcurrentDoubleReadView<'a> {
 /// and iterated without exposing the underlying concurrent histogram's
 /// writer-side mutation methods.
 pub struct ConcurrentDoubleSnapshot<'a, P: OverflowPolicy> {
-    histogram: &'a ConcurrentDoubleHistogramWithPolicy<P>,
+    histogram: &'a ConcurrentDoubleHistogram<P>,
 }
 
-pub type ConcurrentDoubleHistogram = ConcurrentDoubleHistogramWithPolicy<ThrowOnOverflow>;
-pub type SaturatingConcurrentDoubleHistogram = ConcurrentDoubleHistogramWithPolicy<SaturateOnOverflow>;
+pub type SaturatingConcurrentDoubleHistogram = ConcurrentDoubleHistogram<SaturateOnOverflow>;
 
 struct RangeShiftGate<'a> {
     range_shift_in_progress: &'a AtomicBool,
@@ -300,7 +299,7 @@ impl ConcurrentDoubleReadView<'_> {
 }
 
 impl<'a, P: OverflowPolicy> ConcurrentDoubleSnapshot<'a, P> {
-    pub(crate) fn new(histogram: &'a ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
+    pub(crate) fn new(histogram: &'a ConcurrentDoubleHistogram<P>) -> Self {
         ConcurrentDoubleSnapshot { histogram }
     }
 
@@ -458,7 +457,7 @@ impl ReadableHistogram for ConcurrentDoubleReadView<'_> {
 
 impl EncodableHistogram for ConcurrentDoubleReadView<'_> {}
 
-impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
+impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
     pub fn builder() -> ConcurrentDoubleHistogramBuilder<P> {
         ConcurrentDoubleHistogramBuilder::new()
     }
@@ -492,7 +491,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
             ResizableConcurrentHistogram::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
                 .map_err(DoubleCreationError::Internal)?;
 
-        let histogram = ConcurrentDoubleHistogramWithPolicy {
+        let histogram = ConcurrentDoubleHistogram {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: AtomicU64::new(highest_to_lowest_value_ratio),
             current_lowest_value_in_auto_range: AtomicU64::new(0.0_f64.to_bits()),
