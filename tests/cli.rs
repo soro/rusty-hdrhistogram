@@ -117,6 +117,19 @@ fn tags_command_scans_without_decoding_payloads() {
 }
 
 #[test]
+fn summary_rejects_non_finite_header_timestamps_instead_of_emitting_invalid_json() {
+    for header in ["StartTime", "BaseTime"] {
+        for value in ["NaN", "inf", "-inf"] {
+            let log = format!("#[{header}: {value} (seconds since epoch)]\n0,1,0,unused\n");
+            let output = run_with_stdin(&["log", "summary", "--json"], &log);
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("invalid histogram log line"));
+        }
+    }
+}
+
+#[test]
 fn filter_command_scans_without_decoding_payloads() {
     let output = run_with_stdin(
         &["log", "filter", "--tag", "phase-a"],

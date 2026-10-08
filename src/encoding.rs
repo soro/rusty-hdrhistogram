@@ -405,7 +405,7 @@ impl<R: BufRead> HistogramLogScanner<R> {
         let Some(mut record) = self.read_next_scanned_record()? else {
             return Ok(None);
         };
-        self.observe_record(&mut record);
+        self.observe_record(&mut record)?;
         Ok(Some(record))
     }
 
@@ -472,7 +472,7 @@ impl<R: BufRead> HistogramLogScanner<R> {
         }
     }
 
-    fn observe_record(&mut self, record: &mut HistogramLogScannedRecord) {
+    fn observe_record(&mut self, record: &mut HistogramLogScannedRecord) -> Result<(), DecodeError> {
         match record {
             HistogramLogScannedRecord::StartTime(value) => {
                 self.start_time_sec = *value;
@@ -483,7 +483,7 @@ impl<R: BufRead> HistogramLogScanner<R> {
                 self.observed_base_time = true;
             }
             HistogramLogScannedRecord::Interval(interval) => {
-                let timing = self.observe_interval_timing(interval.start_timestamp_sec, interval.interval_length_sec);
+                let timing = self.observe_interval_timing(interval.start_timestamp_sec, interval.interval_length_sec)?;
                 interval.absolute_start_time_sec = timing.absolute_start_time_sec;
                 interval.absolute_end_time_sec = timing.absolute_end_time_sec;
                 interval.relative_start_time_sec = timing.relative_start_time_sec;
@@ -491,30 +491,53 @@ impl<R: BufRead> HistogramLogScanner<R> {
             }
             HistogramLogScannedRecord::Comment(_) | HistogramLogScannedRecord::Legend => {}
         }
+        Ok(())
     }
 
-    fn observe_interval_timing(&mut self, start_timestamp_sec: f64, interval_length_sec: f64) -> HistogramLogIntervalTiming {
-        if !self.observed_start_time {
-            self.start_time_sec = start_timestamp_sec;
-            self.observed_start_time = true;
-        }
-        if !self.observed_base_time {
-            self.base_time_sec = if start_timestamp_sec < self.start_time_sec - (365.0 * 24.0 * 3600.0) {
-                self.start_time_sec
-            } else {
-                0.0
-            };
-            self.observed_base_time = true;
-        }
+    fn observe_interval_timing(
+        &mut self,
+        start_timestamp_sec: f64,
+        interval_length_sec: f64,
+    ) -> Result<HistogramLogIntervalTiming, DecodeError> {
+        let start_time_sec = if self.observed_start_time {
+            self.start_time_sec
+        } else {
+            start_timestamp_sec
+        };
+        let base_time_sec = if self.observed_base_time {
+            self.base_time_sec
+        } else if start_timestamp_sec < start_time_sec - (365.0 * 24.0 * 3600.0) {
+            start_time_sec
+        } else {
+            0.0
+        };
 
-        let absolute_start_time_sec = start_timestamp_sec + self.base_time_sec;
+        let absolute_start_time_sec = start_timestamp_sec + base_time_sec;
         let absolute_end_time_sec = absolute_start_time_sec + interval_length_sec;
-        HistogramLogIntervalTiming {
+        let relative_start_time_sec = absolute_start_time_sec - start_time_sec;
+        let relative_end_time_sec = absolute_end_time_sec - start_time_sec;
+        if ![
             absolute_start_time_sec,
             absolute_end_time_sec,
-            relative_start_time_sec: absolute_start_time_sec - self.start_time_sec,
-            relative_end_time_sec: absolute_end_time_sec - self.start_time_sec,
+            relative_start_time_sec,
+            relative_end_time_sec,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        {
+            return Err(DecodeError::InvalidLogLine("histogram log timestamps overflow".to_string()));
         }
+        // Do not commit inferred header state for an invalid interval.
+        self.start_time_sec = start_time_sec;
+        self.base_time_sec = base_time_sec;
+        self.observed_start_time = true;
+        self.observed_base_time = true;
+        Ok(HistogramLogIntervalTiming {
+            absolute_start_time_sec,
+            absolute_end_time_sec,
+            relative_start_time_sec,
+            relative_end_time_sec,
+        })
     }
 }
 
@@ -1591,14 +1614,18 @@ fn encode_log_line(
     max_value: f64,
     payload: &str,
 ) -> Result<String, EncodeError> {
-    if !start_timestamp_sec.is_finite() || !end_timestamp_sec.is_finite() || end_timestamp_sec < start_timestamp_sec {
+    let interval_length_sec = end_timestamp_sec - start_timestamp_sec;
+    if !start_timestamp_sec.is_finite()
+        || !end_timestamp_sec.is_finite()
+        || end_timestamp_sec < start_timestamp_sec
+        || !interval_length_sec.is_finite()
+    {
         return Err(EncodeError::InvalidLogLine("invalid histogram log interval timestamps".to_string()));
     }
     if !max_value.is_finite() {
         return Err(EncodeError::InvalidLogLine("invalid histogram log max value".to_string()));
     }
 
-    let interval_length_sec = end_timestamp_sec - start_timestamp_sec;
     match tag {
         Some(tag) => {
             if tag.is_empty() || tag.contains(',') || tag.chars().any(char::is_whitespace) {
@@ -1637,7 +1664,12 @@ fn scan_histogram_log_interval_line(line: &str) -> Result<HistogramLogScannedInt
     let start_timestamp_sec = parse_log_f64(fields.next(), line)?;
     let interval_length_sec = parse_log_f64(fields.next(), line)?;
     let max_value = parse_log_f64(fields.next(), line)?;
-    if !start_timestamp_sec.is_finite() || !interval_length_sec.is_finite() || interval_length_sec < 0.0 || !max_value.is_finite() {
+    if !start_timestamp_sec.is_finite()
+        || !interval_length_sec.is_finite()
+        || interval_length_sec < 0.0
+        || !(start_timestamp_sec + interval_length_sec).is_finite()
+        || !max_value.is_finite()
+    {
         return Err(DecodeError::InvalidLogLine(line.to_string()));
     }
     let payload = fields.next().ok_or_else(|| DecodeError::InvalidLogLine(line.to_string()))?;
@@ -1705,7 +1737,13 @@ fn parse_log_comment_time(comment: &str, prefix: &str) -> Option<Result<f64, Dec
         .split(|ch: char| ch == ',' || ch == ']' || ch.is_whitespace())
         .find(|part| !part.is_empty())
         .ok_or_else(|| DecodeError::InvalidLogLine(comment.to_string()));
-    Some(value.and_then(|value| value.parse::<f64>().map_err(|_| DecodeError::InvalidLogLine(comment.to_string()))))
+    Some(value.and_then(|value| {
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| DecodeError::InvalidLogLine(comment.to_string()))
+    }))
 }
 
 #[cfg(feature = "encoding-base64")]

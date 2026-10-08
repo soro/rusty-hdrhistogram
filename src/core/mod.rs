@@ -7,6 +7,7 @@ pub mod util;
 pub(crate) mod constructable_histogram;
 pub(crate) mod coordinated_omission;
 pub mod counter;
+pub(crate) mod double_math;
 pub mod double_policy;
 pub mod readable_histogram;
 

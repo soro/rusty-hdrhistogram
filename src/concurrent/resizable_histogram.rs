@@ -5,7 +5,9 @@ use crate::concurrent::snapshot::{ResizableSnapshot, Snapshot};
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::constants::*;
 use crate::core::*;
-use crate::iteration::{AllValuesIterator, LinearIterator, LogarithmicIterator, PercentileIterator, RecordedValuesIterator};
+use crate::iteration::{
+    AllValuesIterator, IterationError, LinearIterator, LogarithmicIterator, PercentileIterator, RecordedValuesIterator,
+};
 use crossbeam_epoch as epoch;
 use std::ptr;
 use std::sync::atomic::AtomicBool;
@@ -1053,47 +1055,6 @@ impl ResizableConcurrentHistogram {
         self.raw_min_non_zero_value.store(ORIGINAL_MIN, Ordering::Relaxed);
     }
 
-    fn equals(&self, other: &Self) -> bool {
-        if ptr::eq(self, other) {
-            return true;
-        }
-        if !self.settings().equals(&other.settings()) {
-            return false;
-        }
-        check_eq!(
-            self.integer_to_double_value_conversion_ratio(),
-            other.integer_to_double_value_conversion_ratio()
-        );
-        check_eq!(self.get_total_count(), other.get_total_count());
-        check_eq!(self.get_max_value(), other.get_max_value());
-        check_eq!(self.get_min_non_zero_value(), other.get_min_non_zero_value());
-        let self_len = self.counts_array_length();
-        let other_len = other.counts_array_length();
-        if self_len == other_len {
-            for i in 0..self_len {
-                check_eq!(self.unsafe_get_count_at_index(i), other.unsafe_get_count_at_index(i));
-            }
-        } else {
-            let other_last = other_len - 1;
-            let mut iterator = RecordedValuesIterator::from_readable(self.read_view());
-            loop {
-                let Some(value) = (match iterator.try_next() {
-                    Ok(value) => value,
-                    Err(_) => return false,
-                }) else {
-                    break;
-                };
-                let mut other_index = other.layout.counts_array_index(value.value_iterated_to);
-                if other_index > other_last {
-                    other_index = other_last;
-                }
-                let other_count = other.unsafe_get_count_at_index(other_index);
-                check_eq!(value.count_at_value_iterated_to, other_count);
-            }
-        }
-        true
-    }
-
     pub(in crate::concurrent) fn write_inactive_to_active(&self) {
         unsafe {
             let _lg = self.wrp.reader_lock();
@@ -1110,13 +1071,14 @@ impl ResizableConcurrentHistogram {
         }
     }
 
-    // Use only when callers can guarantee no concurrent structural mutation.
+    // Caller must keep all recording and structural mutation frozen.
     pub(crate) unsafe fn unsafe_as_snapshot(&self) -> Snapshot<'_, Self> {
-        Snapshot::new(self)
+        unsafe { Snapshot::new(self) }
     }
 
     pub fn as_snapshot(&mut self) -> ResizableSnapshot<'_> {
-        ResizableSnapshot::new(Snapshot::new(self))
+        // SAFETY: the exclusive borrow prevents recording or mutation.
+        ResizableSnapshot::new(unsafe { Snapshot::new(self) })
     }
 }
 
@@ -1195,7 +1157,12 @@ impl ResizableConcurrentReadView<'_> {
         LinearIterator::from_readable(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+    /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
+    pub fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: u64,
+        log_base: f64,
+    ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::from_readable(self, value_units_in_first_bucket, log_base)
     }
 
@@ -1265,6 +1232,31 @@ impl EncodableHistogram for ResizableConcurrentReadView<'_> {}
 impl FrozenResizableView<'_> {
     pub(super) fn get_min_non_zero_value(&self) -> u64 {
         self.min_non_zero_value
+    }
+
+    fn equals(&self, other: &Self) -> bool {
+        if !self.settings.equals(&other.settings) {
+            return false;
+        }
+        check_eq!(
+            self.integer_to_double_value_conversion_ratio,
+            other.integer_to_double_value_conversion_ratio
+        );
+        check_eq!(self.total_count, other.total_count);
+        check_eq!(self.max_value, other.max_value);
+        check_eq!(self.min_non_zero_value, other.min_non_zero_value);
+
+        // Matching layouts give the same meaning to each logical index, even
+        // when the allocations have different lengths or normalizing offsets.
+        let common_length = self.array_length().min(other.array_length());
+        for index in 0..common_length {
+            check_eq!(self.unsafe_get_count_at_index(index), other.unsafe_get_count_at_index(index));
+        }
+        let longer = if self.array_length() > other.array_length() { self } else { other };
+        for index in common_length..longer.array_length() {
+            check_eq!(longer.unsafe_get_count_at_index(index), 0);
+        }
+        true
     }
 }
 
@@ -1348,8 +1340,13 @@ impl RecordableHistogram for ResizableConcurrentHistogram {
     fn clear_counts_for_reuse(&mut self) {
         ResizableConcurrentHistogram::clear_counts_for_reuse(self);
     }
-    fn equals(&self, other: &Self) -> bool {
-        ResizableConcurrentHistogram::equals(self, other)
+    unsafe fn frozen_equals(&self, other: &Self) -> bool {
+        // SAFETY: the caller guarantees both histograms remain frozen. These
+        // views neither lock nor allocate, so opposing comparisons cannot
+        // deadlock and do not need a lock-order convention.
+        let left = unsafe { self.frozen_view() };
+        let right = unsafe { other.frozen_view() };
+        left.equals(&right)
     }
     fn get_min_non_zero_value(&self) -> u64 {
         ResizableConcurrentHistogram::get_min_non_zero_value(self)
@@ -1392,5 +1389,70 @@ impl ReadableHistogram for ResizableConcurrentHistogram {
 
     fn normalizing_index_offset(&self) -> i32 {
         ResizableConcurrentHistogram::normalizing_index_offset(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{mpsc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn frozen_snapshot_equality_needs_no_structural_locks() {
+        let (finished, completion) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut left = ResizableConcurrentHistogram::with_low_high_sigvdig(1, 16, 0).unwrap();
+            let mut right = ResizableConcurrentHistogram::with_low_high_sigvdig(1, 128, 0).unwrap();
+            for value in [2, 4, 8] {
+                left.record_value(value).unwrap();
+                right.record_value(value * 2).unwrap();
+            }
+            left.shift_values_left(1).unwrap();
+            assert_ne!(left.counts_array_length(), right.counts_array_length());
+            assert_ne!(left.normalizing_index_offset(), right.normalizing_index_offset());
+            {
+                let _left_lock = left.wrp.reader_lock();
+                let _right_lock = right.wrp.reader_lock();
+                // SAFETY: both histograms are local, with no recording or
+                // structural mutation during these snapshot borrows.
+                let left = unsafe { left.unsafe_as_snapshot() };
+                let right = unsafe { right.unsafe_as_snapshot() };
+                assert!(left.equals(&right));
+                assert!(right.equals(&left));
+                assert!(left.equals(&left));
+            }
+            {
+                let left = left.as_snapshot();
+                let right = right.as_snapshot();
+                let start = Barrier::new(2);
+                thread::scope(|scope| {
+                    scope.spawn(|| {
+                        start.wait();
+                        for _ in 0..16 {
+                            assert!(left.equals(&right));
+                        }
+                    });
+                    scope.spawn(|| {
+                        start.wait();
+                        for _ in 0..16 {
+                            assert!(right.equals(&left));
+                        }
+                    });
+                });
+            }
+            // Equal metadata must not hide different per-bucket counts.
+            right.clear_counts_for_reuse();
+            for value in [4, 4, 16] {
+                right.record_value(value).unwrap();
+            }
+            assert!(!left.as_snapshot().equals(&right.as_snapshot()));
+            finished.send(()).unwrap();
+        });
+        completion
+            .recv_timeout(Duration::from_secs(if cfg!(miri) { 180 } else { 30 }))
+            .expect("snapshot comparison stalled or panicked");
+        worker.join().unwrap();
     }
 }

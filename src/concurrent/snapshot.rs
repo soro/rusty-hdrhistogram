@@ -7,7 +7,10 @@ use crate::iteration::*;
 pub(crate) struct Snapshot<'a, T: 'a + RecordableHistogram>(&'a T);
 
 impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
-    pub(in crate::concurrent) fn new(histogram: &T) -> Snapshot<'_, T> {
+    /// # Safety
+    /// All writers must have completed, and the histogram must remain frozen
+    /// for the lifetime of this snapshot and its borrowed iterators.
+    pub(in crate::concurrent) unsafe fn new(histogram: &T) -> Snapshot<'_, T> {
         Snapshot(histogram)
     }
 
@@ -19,7 +22,11 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
         LinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub(crate) fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+    pub(crate) fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: u64,
+        log_base: f64,
+    ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 
@@ -32,7 +39,9 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
     }
 
     pub(crate) fn equals(&self, other: &Snapshot<'_, T>) -> bool {
-        self.0.equals(other.0)
+        // SAFETY: snapshot construction guarantees that both histograms stay
+        // frozen until these borrows end.
+        unsafe { self.0.frozen_equals(other.0) }
     }
 
     pub(crate) fn counts_array_length(&self) -> u32 {
@@ -115,7 +124,12 @@ macro_rules! impl_snapshot_wrapper {
                 LinearIterator::new(self, value_units_per_bucket)
             }
 
-            pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+            /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
+            pub fn logarithmic_bucket_values(
+                &self,
+                value_units_in_first_bucket: u64,
+                log_base: f64,
+            ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
                 LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
             }
 

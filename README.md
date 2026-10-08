@@ -253,6 +253,10 @@ serialize cross-histogram additions that could form a cycle, or copy each source
 into independent storage and release its live read view before merging. This
 limitation concerns cross-histogram addition, not ordinary concurrent recording.
 
+Resizable snapshot equality uses frozen backing-array views without acquiring
+structural locks. Comparing two frozen snapshots in opposite directions is safe,
+including when their allocated capacities differ.
+
 ## Encoding And Logs
 
 The `encoding` module contains Java-compatible V2 binary encoding, compressed
@@ -341,9 +345,22 @@ with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
   of reapplying Java's conservative constructor ratio limit. This permits
   round-tripping valid auto-grown histograms whose range exceeds that limit;
   Java may reject these encodings. Overflowing or inconsistent layouts are
-  still rejected. Public constructor limits and recording behavior are
-  unchanged; constructor-based buffer recreation is not covered by this
+  still rejected. Public constructor limits are unchanged;
+  constructor-based buffer recreation is not covered by this
   decoding exception.
+- Double decoding also rejects unusable floating-point ranges: range bounds and
+  conversion ratios/reciprocals must stay finite and positive. Slow range shifts
+  validate the proposed range before changing counts or publishing metadata.
+  Growth retains unchanged bounds directly, avoiding intermediate scaling that
+  could overflow or lose precision.
+  Values too small to retain a usable conversion return an out-of-range error
+  (or clamp to the retained range under the saturating policy), rather than
+  leaving a histogram with an underflowed conversion. Earlier valid shifts may
+  remain applied when a later shift fails. These checks run only at decoding
+  and cold range-shift boundaries, not on ordinary in-range recording.
+- Log readers reject non-finite `StartTime`/`BaseTime` headers and timestamp
+  arithmetic overflow, so accepted intervals retain usable absolute/relative
+  times and CLI JSON output does not contain `NaN` or infinity.
 - Rust avoids a Java double-histogram range-shift bug where the high-side shift
   path can scale the published range twice. This preserves the pre-shift value
   mapping instead of matching Java's current corrupting edge behavior.
@@ -445,6 +462,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Direct live concurrent histograms intentionally do not expose infallible scan
 iterators. Take a recorder sample or captured read view first.
+
+Logarithmic iterators require a positive first bucket width and a finite base
+strictly greater than `1`. Double bucket widths must also be finite and their
+converted integer width must fit. `logarithmic_bucket_values()`, iterator
+construction, and `reset()` return `Result<_, IterationError>` with
+`InvalidBucketWidth` or `InvalidLogBase` for invalid parameters. An invalid reset
+leaves the iterator unchanged. Validation adds no per-step iteration checks and
+does not affect recording. Reporters can propagate errors with `?` or skip a
+report without panicking:
+
+```rust
+# use hdrhistogram::Histogram;
+# let histogram = Histogram::builder().build().unwrap();
+if let Ok(values) = histogram.logarithmic_bucket_values(1, 2.0) {
+    for value in values {
+        // Export this bucket.
+        let _count = value.count_added_in_this_iteration_step;
+    }
+}
+```
 
 ## Performance Snapshot
 

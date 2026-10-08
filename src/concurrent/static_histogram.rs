@@ -385,13 +385,14 @@ impl FixedConcurrentHistogram {
         true
     }
 
-    // Use only when callers can guarantee no concurrent structural mutation.
+    // Caller must keep all recording and structural mutation frozen.
     pub(crate) unsafe fn unsafe_as_snapshot(&self) -> Snapshot<'_, Self> {
-        Snapshot::new(self)
+        unsafe { Snapshot::new(self) }
     }
 
     pub fn as_snapshot(&mut self) -> FixedSnapshot<'_> {
-        FixedSnapshot::new(Snapshot::new(self))
+        // SAFETY: the exclusive borrow prevents recording or mutation.
+        FixedSnapshot::new(unsafe { Snapshot::new(self) })
     }
 }
 
@@ -433,7 +434,7 @@ impl RecordableHistogram for FixedConcurrentHistogram {
     fn clear_counts_for_reuse(&mut self) {
         FixedConcurrentHistogram::clear_counts_for_reuse(self);
     }
-    fn equals(&self, other: &Self) -> bool {
+    unsafe fn frozen_equals(&self, other: &Self) -> bool {
         FixedConcurrentHistogram::equals(self, other)
     }
     fn get_min_non_zero_value(&self) -> u64 {

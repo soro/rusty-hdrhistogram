@@ -22,17 +22,17 @@ pub fn next_below(value: f64) -> f64 {
 
 pub mod hashing {
     pub fn hash_mix(h: &mut i64) {
-        *h += *h << 10;
+        *h = h.wrapping_add(*h << 10);
         *h ^= *h >> 6;
     }
 
     pub fn add_mix32(h: &mut i64, t: u32) {
-        *h += t as i64;
+        *h = h.wrapping_add(t as i64);
         hash_mix(h);
     }
 
     pub fn add_mix64(h: &mut i64, v: u64) {
-        *h += v as i64;
+        *h = h.wrapping_add(v as i64);
         hash_mix(h);
     }
 }

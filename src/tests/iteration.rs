@@ -1,4 +1,78 @@
 use crate::tests::util::*;
+use crate::IterationError;
+
+// The same errors must protect ordinary histograms, frozen snapshots,
+// and captured live views, including reset before any state is changed.
+macro_rules! check_logarithmic_parameters {
+    ($histogram:expr, $width:expr, $invalid:expr) => {{
+        let histogram = &$histogram;
+        let mut reference = histogram.logarithmic_bucket_values($width, 2.0).unwrap();
+        let first = reference.try_next().unwrap();
+        let second = reference.try_next().unwrap();
+        assert!(first.is_some() && second.is_some());
+        for (width, base, error) in $invalid {
+            assert_eq!(Some(error), histogram.logarithmic_bucket_values(width, base).err());
+            let mut iterator = histogram.logarithmic_bucket_values($width, 2.0).unwrap();
+            assert_eq!(first, iterator.try_next().unwrap());
+            assert_eq!(Err(error), iterator.reset(width, base));
+            assert_eq!(second, iterator.try_next().unwrap());
+            iterator.reset($width, 2.0).unwrap();
+            assert_eq!(first, iterator.try_next().unwrap());
+        }
+    }};
+}
+
+#[test]
+fn logarithmic_parameters_are_validated_at_construction_and_reset() {
+    let invalid = [
+        (0, 2.0, IterationError::InvalidBucketWidth),
+        (1, f64::NAN, IterationError::InvalidLogBase),
+        (1, f64::INFINITY, IterationError::InvalidLogBase),
+        (1, f64::NEG_INFINITY, IterationError::InvalidLogBase),
+        (1, -1.0, IterationError::InvalidLogBase),
+        (1, -0.0, IterationError::InvalidLogBase),
+        (1, 0.0, IterationError::InvalidLogBase),
+        (1, 0.5, IterationError::InvalidLogBase),
+        (1, 1.0, IterationError::InvalidLogBase),
+    ];
+    let mut histogram = crate::Histogram::builder().significant_digits(0).build().unwrap();
+    let mut concurrent = crate::concurrent::ResizableConcurrentHistogram::builder()
+        .significant_digits(0)
+        .build()
+        .unwrap();
+    for value in [0, 4, 16] {
+        histogram.record_value(value).unwrap();
+        concurrent.record_value(value).unwrap();
+    }
+    check_logarithmic_parameters!(histogram, 1, invalid);
+    check_logarithmic_parameters!(concurrent.as_snapshot(), 1, invalid);
+    check_logarithmic_parameters!(concurrent.read_view(), 1, invalid);
+}
+
+#[test]
+fn double_logarithmic_parameters_are_validated_at_construction_and_reset() {
+    let mut invalid = vec![];
+    for width in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+        invalid.push((width, 2.0, IterationError::InvalidBucketWidth));
+    }
+    for base in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, -0.0, 0.0, 0.5, 1.0] {
+        invalid.push((1.0, base, IterationError::InvalidLogBase));
+    }
+    let mut histogram = crate::DoubleHistogram::builder().significant_digits(0).build().unwrap();
+    let concurrent = crate::concurrent::ConcurrentDoubleHistogram::builder()
+        .significant_digits(0)
+        .build()
+        .unwrap();
+    for value in [0.0, 4.0, 16.0] {
+        histogram.record_value(value).unwrap();
+        concurrent.record_value(value).unwrap();
+    }
+    check_logarithmic_parameters!(histogram, 1.0, invalid.iter().copied());
+    check_logarithmic_parameters!(concurrent.read_view(), 1.0, invalid.iter().copied());
+    let recorder = crate::DoubleRecorder::from_histogram(concurrent);
+    let sample = recorder.begin_interval_sample();
+    check_logarithmic_parameters!(sample.snapshot(), 1.0, invalid.iter().copied());
+}
 
 #[test]
 fn percentiles() {
@@ -87,7 +161,7 @@ fn logarithmic_bucket_values() {
 
     let mut index = 0;
 
-    for value in raw_histogram.logarithmic_bucket_values(10000, 2.0) {
+    for value in raw_histogram.logarithmic_bucket_values(10000, 2.0).unwrap() {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(
@@ -113,7 +187,7 @@ fn logarithmic_bucket_values() {
     index = 0;
     let mut total_added_counts = 0;
 
-    for value in histogram.logarithmic_bucket_values(10000, 2.0) {
+    for value in histogram.logarithmic_bucket_values(10000, 2.0).unwrap() {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(

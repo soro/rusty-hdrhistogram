@@ -204,14 +204,33 @@ impl<H: IterableHistogram> Iterator for LinearIterator<H> {
 
 pub struct LogarithmicIterator<H>(HistogramIterator<H, LogarithmicStrategy>);
 
+fn validate_logarithmic_parameters(value_units_in_first_bucket: u64, log_base: f64) -> Result<(), IterationError> {
+    if value_units_in_first_bucket == 0 {
+        return Err(IterationError::InvalidBucketWidth);
+    }
+    if !log_base.is_finite() || log_base <= 1.0 {
+        return Err(IterationError::InvalidLogBase);
+    }
+    Ok(())
+}
+
 impl<H: IterableHistogram> LogarithmicIterator<H> {
-    pub fn new(histogram: H, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<H> {
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
+    /// is zero, or [`IterationError::InvalidLogBase`] if `log_base` is non-finite
+    /// or at most one.
+    pub fn new(histogram: H, value_units_in_first_bucket: u64, log_base: f64) -> Result<LogarithmicIterator<H>, IterationError> {
         LogarithmicIterator::from_readable(histogram, value_units_in_first_bucket, log_base)
     }
 }
 
 impl<H: ReadableHistogram> LogarithmicIterator<H> {
-    pub(crate) fn from_readable(histogram: H, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<H> {
+    pub(crate) fn from_readable(
+        histogram: H,
+        value_units_in_first_bucket: u64,
+        log_base: f64,
+    ) -> Result<LogarithmicIterator<H>, IterationError> {
+        validate_logarithmic_parameters(value_units_in_first_bucket, log_base)?;
         let hvrl = value_units_in_first_bucket - 1;
         let strategy = LogarithmicStrategy {
             value_units_in_first_bucket,
@@ -221,14 +240,19 @@ impl<H: ReadableHistogram> LogarithmicIterator<H> {
             current_step_lowest_value_reporting_level: histogram.settings().lowest_equivalent_value(hvrl),
         };
         let state = IterationState::new(&histogram);
-        LogarithmicIterator(HistogramIterator {
+        Ok(LogarithmicIterator(HistogramIterator {
             histogram,
             state,
             strategy,
-        })
+        }))
     }
 
-    pub fn reset(&mut self, value_units_in_first_bucket: u64, log_base: f64) {
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
+    /// is zero, or [`IterationError::InvalidLogBase`] if `log_base` is non-finite
+    /// or at most one. An error leaves the iterator unchanged.
+    pub fn reset(&mut self, value_units_in_first_bucket: u64, log_base: f64) -> Result<(), IterationError> {
+        validate_logarithmic_parameters(value_units_in_first_bucket, log_base)?;
         self.0.state.reset(&self.0.histogram);
 
         let hvrl = value_units_in_first_bucket - 1;
@@ -239,6 +263,7 @@ impl<H: ReadableHistogram> LogarithmicIterator<H> {
         strategy.next_value_reporting_level = value_units_in_first_bucket as f64;
         strategy.current_step_highest_value_reporting_level = hvrl;
         strategy.current_step_lowest_value_reporting_level = self.0.histogram.settings().lowest_equivalent_value(hvrl);
+        Ok(())
     }
 
     fn histogram(&self) -> &H {
@@ -368,19 +393,19 @@ pub struct DoubleLinearIterator<H>(LinearIterator<H>);
 
 impl<H: IterableHistogram> DoubleLinearIterator<H> {
     pub fn new(histogram: H, value_units_per_bucket: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket);
+        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket).expect("invalid linear bucket width");
         DoubleLinearIterator(LinearIterator::new(histogram, integer_units))
     }
 }
 
 impl<H: ReadableHistogram> DoubleLinearIterator<H> {
     pub(crate) fn from_readable(histogram: H, value_units_per_bucket: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket);
+        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket).expect("invalid linear bucket width");
         DoubleLinearIterator(LinearIterator::from_readable(histogram, integer_units))
     }
 
     pub fn reset(&mut self, value_units_per_bucket: f64) {
-        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_per_bucket);
+        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_per_bucket).expect("invalid linear bucket width");
         self.0.reset(units);
     }
 
@@ -400,21 +425,34 @@ impl<H: IterableHistogram> Iterator for DoubleLinearIterator<H> {
 pub struct DoubleLogarithmicIterator<H>(LogarithmicIterator<H>);
 
 impl<H: IterableHistogram> DoubleLogarithmicIterator<H> {
-    pub fn new(histogram: H, value_units_in_first_bucket: f64, log_base: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_in_first_bucket);
-        DoubleLogarithmicIterator(LogarithmicIterator::new(histogram, integer_units, log_base))
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
+    /// is non-finite, non-positive, or too large in integer units. Returns
+    /// [`IterationError::InvalidLogBase`] if `log_base` is non-finite or at most
+    /// one. Positive widths smaller than one integer unit round up to one.
+    pub fn new(histogram: H, value_units_in_first_bucket: f64, log_base: f64) -> Result<Self, IterationError> {
+        DoubleLogarithmicIterator::from_readable(histogram, value_units_in_first_bucket, log_base)
     }
 }
 
 impl<H: ReadableHistogram> DoubleLogarithmicIterator<H> {
-    pub(crate) fn from_readable(histogram: H, value_units_in_first_bucket: f64, log_base: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_in_first_bucket);
-        DoubleLogarithmicIterator(LogarithmicIterator::from_readable(histogram, integer_units, log_base))
+    pub(crate) fn from_readable(histogram: H, value_units_in_first_bucket: f64, log_base: f64) -> Result<Self, IterationError> {
+        let integer_units = double_value_units_to_integer_units(&histogram, value_units_in_first_bucket)?;
+        Ok(DoubleLogarithmicIterator(LogarithmicIterator::from_readable(
+            histogram,
+            integer_units,
+            log_base,
+        )?))
     }
 
-    pub fn reset(&mut self, value_units_in_first_bucket: f64, log_base: f64) {
-        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_in_first_bucket);
-        self.0.reset(units, log_base);
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
+    /// is non-finite, non-positive, or too large in integer units. Returns
+    /// [`IterationError::InvalidLogBase`] if `log_base` is non-finite or at most
+    /// one. An error leaves the iterator unchanged.
+    pub fn reset(&mut self, value_units_in_first_bucket: f64, log_base: f64) -> Result<(), IterationError> {
+        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_in_first_bucket)?;
+        self.0.reset(units, log_base)
     }
 
     pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
@@ -460,12 +498,13 @@ impl<H: IterableHistogram> Iterator for DoublePercentileIterator<H> {
     }
 }
 
-fn double_value_units_to_integer_units<T: ReadableHistogram>(histogram: &T, value_units: f64) -> u64 {
-    assert!(
-        value_units.is_finite() && value_units > 0.0,
-        "value units must be finite and positive"
-    );
+fn double_value_units_to_integer_units<T: ReadableHistogram>(histogram: &T, value_units: f64) -> Result<u64, IterationError> {
+    if !value_units.is_finite() || value_units <= 0.0 {
+        return Err(IterationError::InvalidBucketWidth);
+    }
     let units = value_units / histogram.integer_to_double_value_conversion_ratio();
-    assert!(units.is_finite() && units <= u64::MAX as f64, "value units are out of range");
-    (units as u64).max(1)
+    if !units.is_finite() || units > u64::MAX as f64 {
+        return Err(IterationError::InvalidBucketWidth);
+    }
+    Ok((units as u64).max(1))
 }

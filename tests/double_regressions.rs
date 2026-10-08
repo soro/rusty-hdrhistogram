@@ -45,7 +45,7 @@ fn frozen_double_snapshot_supports_overlapping_reads_and_next_interval_writers()
             let view = snapshot.read_view();
             let all = snapshot.all_values();
             let linear = snapshot.linear_bucket_values(1_024.0);
-            let logarithmic = snapshot.logarithmic_bucket_values(1.0, 2.0);
+            let logarithmic = snapshot.logarithmic_bucket_values(1.0, 2.0).unwrap();
             let percentiles = snapshot.percentiles(2);
 
             assert_eq!(reference.get_max_value(), snapshot.get_max_value());
@@ -106,6 +106,148 @@ fn empty_frozen_double_sample_supports_overlapping_queries_and_encoding() {
         let encoded = encode_concurrent_double_snapshot_v2(&snapshot).unwrap();
         assert_eq!(0, decode_double_histogram_v2(&encoded).unwrap().get_total_count());
         assert!(recorded.next().is_none());
+    });
+}
+
+#[test]
+fn rejected_tiny_double_values_leave_usable_range_state() {
+    completes_without_deadlock(|| {
+        macro_rules! check {
+            ($histogram:expr) => {{
+                #[allow(unused_mut)]
+                let mut histogram = $histogram;
+                assert_eq!(
+                    Err(RecordError::ValueOutOfRangeResizeDisabled),
+                    histogram.record_value(f64::from_bits(1))
+                );
+                assert_eq!(0, histogram.get_total_count());
+                assert!(histogram.get_max_value().is_finite());
+                histogram.record_value_with_count(0.0, 3).unwrap();
+                assert_eq!(
+                    Err(RecordError::ValueOutOfRangeResizeDisabled),
+                    histogram.record_value_with_count(f64::from_bits(1), 5)
+                );
+                assert_eq!(3, histogram.get_total_count());
+                assert_eq!(3, histogram.get_count_at_value(0.0));
+                assert!(histogram.get_max_value().is_finite());
+                histogram.record_value(1.0).unwrap();
+                assert_eq!(4, histogram.get_total_count());
+                assert_eq!(1, histogram.get_count_at_value(1.0));
+                assert!(histogram.get_max_value().is_finite());
+            }};
+        }
+        for digits in [0, 3] {
+            // Larger shifts keep the boundary exercise inexpensive in Miri.
+            check!(DoubleHistogram::builder()
+                .significant_digits(digits)
+                .highest_to_lowest_value_ratio(1_024)
+                .build()
+                .unwrap());
+            check!(ConcurrentDoubleHistogram::builder()
+                .significant_digits(digits)
+                .highest_to_lowest_value_ratio(1_024)
+                .build()
+                .unwrap());
+        }
+    });
+}
+
+#[test]
+fn double_range_growth_preserves_finite_bounds_near_float_limit() {
+    completes_without_deadlock(|| {
+        macro_rules! check {
+            ($histogram:expr) => {{
+                #[allow(unused_mut)]
+                let mut histogram = $histogram;
+                let high = f64::from_bits((1_020 + 1_023) << 52);
+                let low = f64::from_bits((995 + 1_023) << 52);
+                histogram.record_value(high).unwrap();
+                // Keeping the high bound while growing downward must not
+                // divide it by the shift multiplier and then multiply back:
+                // that intermediate value overflows despite a valid result.
+                histogram.record_value(low).unwrap();
+                assert_eq!(2, histogram.get_total_count());
+                assert_eq!(1, histogram.get_count_at_value(high));
+                assert_eq!(1, histogram.get_count_at_value(low));
+                assert!(histogram.get_max_value().is_finite());
+            }};
+        }
+        check!(DoubleHistogram::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap());
+        check!(ConcurrentDoubleHistogram::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap());
+    });
+}
+
+#[test]
+fn saturating_tiny_double_values_keep_queries_and_later_records_usable() {
+    completes_without_deadlock(|| {
+        macro_rules! check {
+            ($histogram:expr) => {{
+                #[allow(unused_mut)]
+                let mut histogram = $histogram;
+                histogram.record_value(f64::from_bits(1)).unwrap();
+                histogram.record_value_with_count(f64::from_bits(1), 2).unwrap();
+                assert_eq!(3, histogram.get_total_count());
+                let clamped = histogram.get_min_value();
+                assert!(clamped.is_finite() && clamped > f64::from_bits(1));
+                assert!(histogram.get_max_value().is_finite());
+                assert_eq!(3, histogram.get_count_at_value(clamped));
+                histogram.record_value(clamped).unwrap();
+                assert_eq!(4, histogram.get_total_count());
+            }};
+        }
+        check!(SaturatingDoubleHistogram::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap());
+        check!(SaturatingConcurrentDoubleHistogram::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap());
+    });
+}
+
+#[test]
+fn double_recorders_can_sample_after_a_tiny_value_error() {
+    completes_without_deadlock(|| {
+        let recorder = DoubleRecorder::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap();
+        assert_eq!(
+            Err(RecordError::ValueOutOfRangeResizeDisabled),
+            recorder.record_value(f64::from_bits(1))
+        );
+        let sample = recorder.begin_interval_sample();
+        assert_eq!(0, sample.snapshot().get_total_count());
+        assert!(sample.snapshot().get_max_value().is_finite());
+        recorder.record_value(1.0).unwrap();
+        assert_eq!(1, sample.resample().snapshot().get_total_count());
+
+        let (mut writer, mut sampler) = SingleWriterDoubleRecorder::builder()
+            .significant_digits(0)
+            .highest_to_lowest_value_ratio(1_024)
+            .build()
+            .unwrap();
+        assert_eq!(
+            Err(RecordError::ValueOutOfRangeResizeDisabled),
+            writer.record_value(f64::from_bits(1))
+        );
+        let sample = sampler.begin_interval_sample();
+        assert_eq!(0, sample.snapshot().get_total_count());
+        assert!(sample.snapshot().get_max_value().is_finite());
+        writer.record_value(1.0).unwrap();
+        assert_eq!(1, sample.resample().snapshot().get_total_count());
     });
 }
 

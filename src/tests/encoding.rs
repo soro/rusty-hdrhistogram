@@ -149,6 +149,103 @@ fn double_histogram_decode_rejects_offset_that_would_break_range_shifts() {
 }
 
 #[test]
+fn double_histogram_decode_validates_derived_ranges_and_reciprocals() {
+    let histogram = DoubleHistogram::new();
+    let mut encoded = encode_double_histogram_v2(&histogram).unwrap();
+    for ratio in [f64::MAX, f64::MAX / 1_024.0, f64::from_bits(1), 1e-320] {
+        // Double framing is 16 bytes; the inner V2 ratio starts at byte 32.
+        encoded[48..56].copy_from_slice(&ratio.to_be_bytes());
+        assert!(matches!(
+            decode_double_histogram_v2(&encoded),
+            Err(DecodeError::DoubleCreation(crate::DoubleCreationError::InternalHistogramMismatch))
+        ));
+        #[cfg(feature = "encoding-compression")]
+        {
+            let mut compressed = DOUBLE_HISTOGRAM_COMPRESSED_ENCODING_COOKIE.to_be_bytes().to_vec();
+            compressed.extend_from_slice(&encoded[4..16]);
+            compressed.extend_from_slice(&compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &zlib_compress(&encoded[16..])));
+            assert!(matches!(
+                decode_double_histogram_compressed(&compressed),
+                Err(DecodeError::DoubleCreation(crate::DoubleCreationError::InternalHistogramMismatch))
+            ));
+        }
+    }
+    // Subnormal conversion ratios with finite reciprocals remain valid.
+    for ratio in [f64::MIN_POSITIVE / 2.0, f64::MIN_POSITIVE, 1.0] {
+        encoded[48..56].copy_from_slice(&ratio.to_be_bytes());
+        let mut decoded = decode_double_histogram_v2(&encoded).unwrap();
+        let value = decoded.get_current_lowest_trackable_non_zero_value() * 2.0;
+        decoded.record_value(value).unwrap();
+        assert_eq!(1, decoded.get_count_at_value(value));
+        assert!(decoded.get_max_value().is_finite());
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_headers_reject_non_finite_timestamps() {
+    for header in ["StartTime", "BaseTime"] {
+        for value in ["NaN", "inf", "-inf"] {
+            let line = format!("#[{header}: {value} (seconds since epoch)]");
+            assert!(matches!(scan_histogram_log_line(&line), Err(DecodeError::InvalidLogLine(_))));
+            assert!(matches!(decode_histogram_log_line(&line), Err(DecodeError::InvalidLogLine(_))));
+            let mut scanner = HistogramLogScanner::new(Cursor::new(line.as_bytes()));
+            assert!(matches!(scanner.next_record(), Err(DecodeError::InvalidLogLine(_))));
+            assert!(!scanner.observed_start_time());
+            assert!(!scanner.observed_base_time());
+            assert!(matches!(
+                generate_histogram_log_report([line.as_str()], &HistogramLogReportConfig::default()),
+                Err(DecodeError::InvalidLogLine(_))
+            ));
+        }
+    }
+}
+
+#[test]
+fn decoded_double_range_growth_retains_low_bound_without_precision_loss() {
+    let histogram = DoubleHistogram::builder().significant_digits(0).build().unwrap();
+    let mut encoded = encode_double_histogram_v2(&histogram).unwrap();
+    let ratio = f64::from_bits(f64::MIN_POSITIVE.to_bits() + 1);
+    encoded[48..56].copy_from_slice(&ratio.to_be_bytes());
+    let mut decoded = decode_double_histogram_v2(&encoded).unwrap();
+    let low = decoded.get_current_lowest_trackable_non_zero_value();
+    let high = low * 1_024.0;
+    decoded.record_value(low).unwrap();
+    // Dividing the retained low bound before scaling it back would round away
+    // its low bit in the subnormal intermediate value.
+    decoded.record_value(high).unwrap();
+    assert_eq!(low, decoded.get_current_lowest_trackable_non_zero_value());
+    assert_eq!(1, decoded.get_count_at_value(low));
+    assert_eq!(1, decoded.get_count_at_value(high));
+    assert_eq!(&ratio.to_be_bytes(), &encode_double_histogram_v2(&decoded).unwrap()[48..56]);
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_scanner_rejects_derived_timestamp_overflow() {
+    for (start, base, interval_start, length) in [
+        (0.0, f64::MAX, f64::MAX, 0.0),  // Absolute start overflows.
+        (0.0, f64::MAX, 0.0, f64::MAX),  // Absolute end overflows.
+        (-f64::MAX, 0.0, f64::MAX, 0.0), // Relative start/end overflow.
+        (f64::MAX, 0.0, -f64::MAX, 0.0),
+    ] {
+        let log = format!("#[StartTime: {start}]\n#[BaseTime: {base}]\n{interval_start},{length},0,unused\n");
+        let mut scanner = HistogramLogScanner::new(Cursor::new(log));
+        assert!(matches!(scanner.next_interval(), Err(DecodeError::InvalidLogLine(_))));
+    }
+
+    let histogram = Histogram::builder().build().unwrap();
+    assert!(matches!(
+        encode_histogram_log_line(&histogram, -f64::MAX, f64::MAX),
+        Err(EncodeError::InvalidLogLine(_))
+    ));
+    assert!(matches!(
+        scan_histogram_log_line(&format!("{0},{0},0,unused", f64::MAX)),
+        Err(DecodeError::InvalidLogLine(_))
+    ));
+}
+
+#[test]
 fn generic_decode_detects_integer_histogram() {
     let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     histogram.record_value_with_count(2_000, 7).unwrap();

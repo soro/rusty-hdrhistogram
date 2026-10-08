@@ -1,6 +1,7 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::resizable_histogram::FrozenResizableView;
 use crate::concurrent::{ResizableConcurrentHistogram, ResizableConcurrentReadView, ResizableStructuralMutation};
+use crate::core::double_math::{is_valid_range, ulp};
 use crate::core::util;
 use crate::core::{
     DoubleCreationError, EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram, OverflowPolicy, ReadableHistogram,
@@ -24,21 +25,6 @@ fn highest_allowed_value_ever() -> f64 {
         }
         value
     })
-}
-
-fn ulp(value: f64) -> f64 {
-    if value.is_nan() {
-        return f64::NAN;
-    }
-    if value.is_infinite() {
-        return f64::INFINITY;
-    }
-    let bits = value.to_bits();
-    if value >= 0.0 {
-        f64::from_bits(bits + 1) - value
-    } else {
-        value - f64::from_bits(bits - 1)
-    }
 }
 
 fn find_containing_binary_order_of_magnitude_long(long_number: u64) -> u32 {
@@ -254,7 +240,12 @@ impl ConcurrentDoubleReadView<'_> {
         DoubleLinearIterator::from_readable(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: f64, log_base: f64) -> DoubleLogarithmicIterator<&'_ Self> {
+    /// Returns an error for invalid bucket parameters; see [`DoubleLogarithmicIterator::new`].
+    pub fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: f64,
+        log_base: f64,
+    ) -> Result<DoubleLogarithmicIterator<&'_ Self>, crate::iteration::IterationError> {
         DoubleLogarithmicIterator::from_readable(self, value_units_in_first_bucket, log_base)
     }
 
@@ -447,7 +438,12 @@ impl<'a, P: OverflowPolicy> ConcurrentDoubleSnapshot<'a, P> {
         DoubleLinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: f64, log_base: f64) -> DoubleLogarithmicIterator<&'_ Self> {
+    /// Returns an error for invalid bucket parameters; see [`DoubleLogarithmicIterator::new`].
+    pub fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: f64,
+        log_base: f64,
+    ) -> Result<DoubleLogarithmicIterator<&'_ Self>, crate::iteration::IterationError> {
         DoubleLogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 
@@ -1082,12 +1078,21 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
         self.range_generation.fetch_add(1, Ordering::Release);
     }
 
+    #[cold]
+    #[inline(never)]
     fn shift_covered_range_to_the_right(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
         let mut new_lowest = self.current_lowest_value_in_auto_range();
         let mut new_highest = self.current_highest_value_limit_in_auto_range();
         let original_lowest = new_lowest;
         let original_highest = new_highest;
         let shift_multiplier = 1.0 / (1_u64 << number_of_binary_orders_of_magnitude) as f64;
+        if !is_valid_range(
+            new_lowest * shift_multiplier,
+            new_highest * shift_multiplier,
+            self.lowest_tracking_integer_value(),
+        ) {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
 
         let mut mutation = self.integer_histogram.begin_structural_mutation();
         let _gate = self.close_range_shift_gate();
@@ -1107,16 +1112,18 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
                     .is_err()
             {
                 self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;
-                new_highest /= shift_multiplier;
                 mutation
                     .shift_values_left_with_conversion_ratio(
                         number_of_binary_orders_of_magnitude,
                         new_integer_to_double_value_conversion_ratio,
                     )
                     .map_err(|_| RecordError::ValueOutOfRangeResizeDisabled)?;
+                // Growth retains the high bound. Dividing and multiplying it
+                // back would risk an overflowing intermediate value.
+            } else {
+                new_highest *= shift_multiplier;
             }
             new_lowest *= shift_multiplier;
-            new_highest *= shift_multiplier;
             Ok(())
         })();
 
@@ -1129,12 +1136,21 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
         result
     }
 
+    #[cold]
+    #[inline(never)]
     fn shift_covered_range_to_the_left(&self, number_of_binary_orders_of_magnitude: u32) -> Result<(), RecordError> {
         let mut new_lowest = self.current_lowest_value_in_auto_range();
         let mut new_highest = self.current_highest_value_limit_in_auto_range();
         let original_lowest = new_lowest;
         let original_highest = new_highest;
         let shift_multiplier = 1.0 * (1_u64 << number_of_binary_orders_of_magnitude) as f64;
+        if !is_valid_range(
+            new_lowest * shift_multiplier,
+            new_highest * shift_multiplier,
+            self.lowest_tracking_integer_value(),
+        ) {
+            return Err(RecordError::ValueOutOfRangeResizeDisabled);
+        }
 
         let mut mutation = self.integer_histogram.begin_structural_mutation();
         let _gate = self.close_range_shift_gate();
@@ -1145,22 +1161,21 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
             .store((new_lowest * shift_multiplier).to_bits(), Ordering::Relaxed);
 
         let result = (|| {
-            if self.integer_histogram.get_total_count() > mutation.count_at_index(0) {
-                match mutation.shift_values_right_with_conversion_ratio(
-                    number_of_binary_orders_of_magnitude,
-                    new_integer_to_double_value_conversion_ratio,
-                ) {
-                    Ok(()) => {
-                        // Java currently scales here as well, but that double-scales
-                        // the published range and loses the old double-value mapping.
-                    }
-                    Err(_) => {
-                        self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;
-                        new_lowest /= shift_multiplier;
-                    }
-                }
+            if self.integer_histogram.get_total_count() > mutation.count_at_index(0)
+                && mutation
+                    .shift_values_right_with_conversion_ratio(
+                        number_of_binary_orders_of_magnitude,
+                        new_integer_to_double_value_conversion_ratio,
+                    )
+                    .is_err()
+            {
+                self.handle_shift_values_exception(&mut mutation, number_of_binary_orders_of_magnitude)?;
+                // Growth retains the low bound without underflow-prone
+                // divide-then-multiply cancellation.
+            } else {
+                // Scale once; Java currently double-scales this path.
+                new_lowest *= shift_multiplier;
             }
-            new_lowest *= shift_multiplier;
             new_highest *= shift_multiplier;
             Ok(())
         })();

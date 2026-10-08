@@ -8,6 +8,7 @@ use crate::concurrent::writer_reader_phaser::PhaseFlipGuard;
 use crate::core::OverflowPolicy;
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
+    IterationError,
 };
 use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
@@ -41,6 +42,8 @@ impl<'a, 'b: 'a, T: RecordableHistogram> IntervalSampleCore<'a, 'b, T> {
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot<'_, T> {
+        // SAFETY: sampling drained the writers of this histogram, and this
+        // borrow prevents the sample from being recycled while queried.
         unsafe { Snapshot::new(&*self.histogram.load(Ordering::Acquire)) }
     }
 }
@@ -159,11 +162,12 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleIntervalSample<'a, 'b, P> {
         DoubleLinearIterator::new(self.snapshot(), value_units_per_bucket)
     }
 
+    /// Returns an error for invalid bucket parameters; see [`DoubleLogarithmicIterator::new`].
     pub fn logarithmic_bucket_values(
         &self,
         value_units_in_first_bucket: f64,
         log_base: f64,
-    ) -> DoubleLogarithmicIterator<ConcurrentDoubleSnapshot<'_, P>> {
+    ) -> Result<DoubleLogarithmicIterator<ConcurrentDoubleSnapshot<'_, P>>, IterationError> {
         DoubleLogarithmicIterator::new(self.snapshot(), value_units_in_first_bucket, log_base)
     }
 

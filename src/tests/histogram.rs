@@ -48,6 +48,54 @@ fn empty_histogram() {
 }
 
 #[test]
+fn equal_histograms_hash_equivalent_min_and_max_values() {
+    macro_rules! check {
+        ($histogram:expr) => {{
+            let mut left = $histogram;
+            let mut right = $histogram;
+            left.record_value(2_048).unwrap();
+            right.record_value(2_049).unwrap();
+            assert!(left == right);
+            assert_eq!(left.hash_code(), right.hash_code());
+            let decoded = crate::encoding::decode_histogram_v2(&crate::encoding::encode_histogram_v2(&left).unwrap()).unwrap();
+            assert_eq!(left.hash_code(), decoded.hash_code());
+        }};
+    }
+    check!(Histogram::builder().significant_digits(2).build().unwrap());
+    check!(TestStaticHistogram::new());
+    check!(HistogramWithCounter::<u32>::builder().significant_digits(2).build().unwrap());
+    check!(TestStaticHistogramU32::new());
+}
+
+#[test]
+fn histogram_hash_arithmetic_wraps_in_debug_and_release() {
+    crate::static_histogram! {
+        type HashHistogram = {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 1_000_000_000,
+            significant_digits: 3,
+        };
+    }
+    let mut dynamic = Histogram::builder().build().unwrap();
+    let mut fixed = HashHistogram::new();
+    dynamic.record_value_with_count(766_978_114, 978_114).unwrap();
+    fixed.record_value_with_count(766_978_114, 978_114).unwrap();
+    assert_eq!(dynamic.hash_code(), fixed.hash_code());
+    // Canonicalized tracking from decode must hash identically as well.
+    let decoded = crate::encoding::decode_histogram_v2(&crate::encoding::encode_histogram_v2(&dynamic).unwrap()).unwrap();
+    assert!(dynamic == decoded);
+    assert_eq!(dynamic.hash_code(), decoded.hash_code());
+
+    // Force addition overflow in the mixer independently of raw versus
+    // canonical range tracking. The histogram count itself still fits.
+    let mut dynamic = Histogram::builder().build().unwrap();
+    let mut fixed = HashHistogram::new();
+    dynamic.record_value_with_count(1, i64::MAX as u64).unwrap();
+    fixed.record_value_with_count(1, i64::MAX as u64).unwrap();
+    assert_eq!(dynamic.hash_code(), fixed.hash_code());
+}
+
+#[test]
 fn builder_defaults_to_u64_and_auto_resize() {
     let mut histogram = Histogram::builder()
         .significant_digits(3)

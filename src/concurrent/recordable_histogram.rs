@@ -11,7 +11,9 @@ pub(crate) trait RecordableHistogram: sealed::Sealed + ReadableHistogram + Sized
     fn fresh(settings: &HistogramSettings) -> Result<Self, CreationError>;
     fn meta_data_mut(&mut self) -> &mut HistogramMetaData;
     fn clear_counts_for_reuse(&mut self);
-    fn equals(&self, other: &Self) -> bool;
+    /// # Safety
+    /// Both histograms must remain frozen for the entire comparison.
+    unsafe fn frozen_equals(&self, other: &Self) -> bool;
     fn get_min_non_zero_value(&self) -> u64;
     fn record_value(&self, value: u64) -> Result<(), RecordError>;
     fn record_value_with_count(&self, value: u64, count: u64) -> Result<(), RecordError>;

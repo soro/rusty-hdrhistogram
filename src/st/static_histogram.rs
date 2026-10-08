@@ -234,11 +234,11 @@ impl<
         add_mix32(&mut h, Self::UNIT_MAGNITUDE);
         add_mix32(&mut h, SIGNIFICANT_VALUE_DIGITS as u32);
         add_mix64(&mut h, self.total_count);
-        add_mix64(&mut h, self.raw_max_value);
-        add_mix64(&mut h, self.raw_min_non_zero_value);
-        h += h << 3;
+        add_mix64(&mut h, self.get_max_value());
+        add_mix64(&mut h, self.get_min_non_zero_value());
+        h = h.wrapping_add(h << 3);
         h ^= h >> 11;
-        h += h << 15;
+        h = h.wrapping_add(h << 15);
         h
     }
 
@@ -682,7 +682,12 @@ impl<
         LinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: u64, log_base: f64) -> LogarithmicIterator<&'_ Self> {
+    /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
+    pub fn logarithmic_bucket_values(
+        &self,
+        value_units_in_first_bucket: u64,
+        log_base: f64,
+    ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 

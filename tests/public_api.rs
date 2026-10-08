@@ -26,6 +26,49 @@ fn public_capability_traits_support_generic_iteration_and_encoding() {
 }
 
 #[test]
+fn logarithmic_reporting_can_propagate_parameter_errors() {
+    use hdrhistogram::iteration::{DoubleLogarithmicIterator, IterableHistogram, LogarithmicIterator};
+    use hdrhistogram::{Histogram, IterationError};
+
+    fn count_buckets<H: IterableHistogram>(histogram: &H, width: u64, base: f64) -> Result<u64, IterationError> {
+        let mut values = LogarithmicIterator::new(histogram, width, base)?;
+        values.reset(width, base)?;
+        Ok(values.map(|value| value.count_added_in_this_iteration_step).sum())
+    }
+
+    let mut histogram = Histogram::builder().build().unwrap();
+    // Even an empty reporter rejects invalid parameters without unwinding.
+    assert_eq!(Err(IterationError::InvalidBucketWidth), count_buckets(&histogram, 0, 2.0));
+    assert_eq!(Err(IterationError::InvalidLogBase), count_buckets(&histogram, 1, 1.0));
+    histogram.record_value_with_count(42, 3).unwrap();
+    assert_eq!(Ok(3), count_buckets(&histogram, 1, 1.5));
+
+    assert_eq!(
+        Some(IterationError::InvalidBucketWidth),
+        DoubleLogarithmicIterator::new(&histogram, f64::NAN, 2.0).err()
+    );
+    let mut double_values = DoubleLogarithmicIterator::new(&histogram, 1.0, 2.0).unwrap();
+    assert_eq!(Err(IterationError::InvalidLogBase), double_values.reset(1.0, 1.0));
+    assert_eq!(3, double_values.map(|value| value.count_added_in_this_iteration_step).sum::<u64>());
+
+    let recorder = DoubleRecorder::new();
+    recorder.record_value(42.0).unwrap();
+    let sample = recorder.begin_interval_sample();
+    assert_eq!(
+        Some(IterationError::InvalidLogBase),
+        sample.logarithmic_bucket_values(1.0, 1.0).err()
+    );
+    assert_eq!(
+        1,
+        sample
+            .logarithmic_bucket_values(1.0, 2.0)
+            .unwrap()
+            .map(|value| value.count_added_in_this_iteration_step)
+            .sum::<u64>()
+    );
+}
+
+#[test]
 fn double_aliases_construct_without_policy_annotations() {
     let mut histogram = DoubleHistogram::new();
     histogram.record_value(42.0).unwrap();

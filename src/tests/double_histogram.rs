@@ -1003,6 +1003,7 @@ macro_rules! assert_double_iterator_surface {
 
         let logarithmic_total = $histogram
             .logarithmic_bucket_values(1.0, 2.0)
+            .unwrap()
             .map(|value| value.count_added_in_this_iteration_step)
             .sum::<u64>();
         assert_eq!(3, logarithmic_total);
