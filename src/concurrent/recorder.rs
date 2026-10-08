@@ -1,4 +1,4 @@
-use crate::concurrent::double_histogram::ConcurrentDoubleHistogram;
+use crate::concurrent::double_histogram::ConcurrentDoubleHistogramWithPolicy;
 use crate::concurrent::interval_sample::{
     DoubleIntervalSample, FixedIntervalSample, IntervalSampleCore, ResizableIntervalSample, SingleWriterDoubleIntervalSample,
     SingleWriterIntervalSample,
@@ -8,7 +8,7 @@ use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
 use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
 use crate::core::*;
-use crate::st::{DoubleHistogram, Histogram};
+use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -98,13 +98,12 @@ pub struct SingleWriterRecorderBuilder {
     auto_resize: bool,
 }
 
-pub type SaturatingDoubleRecorder = DoubleRecorder<SaturateOnOverflow>;
-pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorder<SaturateOnOverflow>;
-pub type SaturatingSingleWriterDoubleSampler = SingleWriterDoubleSampler<SaturateOnOverflow>;
+pub type DoubleRecorder = DoubleRecorderWithPolicy<ThrowOnOverflow>;
+pub type SaturatingDoubleRecorder = DoubleRecorderWithPolicy<SaturateOnOverflow>;
 
-pub struct DoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
+pub struct DoubleRecorderWithPolicy<P: OverflowPolicy> {
     instance_id: usize,
-    core: RecorderCore<ConcurrentDoubleHistogram<P>>,
+    core: RecorderCore<ConcurrentDoubleHistogramWithPolicy<P>>,
 }
 
 pub struct DoubleRecorderBuilder<P: OverflowPolicy = ThrowOnOverflow> {
@@ -120,19 +119,24 @@ pub struct DoubleRecorderBuilder<P: OverflowPolicy = ThrowOnOverflow> {
 /// [`SingleWriterDoubleSampler`] to the sampling thread when intervals are
 /// needed. The builder allocates both histogram buffers before returning the
 /// handles.
-pub struct SingleWriterDoubleRecorder<P: OverflowPolicy = ThrowOnOverflow> {
+pub struct SingleWriterDoubleRecorderWithPolicy<P: OverflowPolicy> {
     instance_id: usize,
-    core: Arc<RecorderCore<DoubleHistogram<P>>>,
+    core: Arc<RecorderCore<DoubleHistogramWithPolicy<P>>>,
 }
 
 /// The unique sampling handle paired with a [`SingleWriterDoubleRecorder`].
 ///
 /// Each recycled buffer retains its own expanded capacity. Sampling never
 /// reads mutable range settings from the live active histogram.
-pub struct SingleWriterDoubleSampler<P: OverflowPolicy = ThrowOnOverflow> {
-    core: Arc<RecorderCore<DoubleHistogram<P>>>,
-    inactive_histogram: Option<Box<DoubleHistogram<P>>>,
+pub struct SingleWriterDoubleSamplerWithPolicy<P: OverflowPolicy> {
+    core: Arc<RecorderCore<DoubleHistogramWithPolicy<P>>>,
+    inactive_histogram: Option<Box<DoubleHistogramWithPolicy<P>>>,
 }
+
+pub type SingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<ThrowOnOverflow>;
+pub type SaturatingSingleWriterDoubleRecorder = SingleWriterDoubleRecorderWithPolicy<SaturateOnOverflow>;
+pub type SingleWriterDoubleSampler = SingleWriterDoubleSamplerWithPolicy<ThrowOnOverflow>;
+pub type SaturatingSingleWriterDoubleSampler = SingleWriterDoubleSamplerWithPolicy<SaturateOnOverflow>;
 
 pub struct SingleWriterDoubleRecorderBuilder<P: OverflowPolicy = ThrowOnOverflow> {
     highest_to_lowest_value_ratio: u64,
@@ -307,13 +311,13 @@ impl<P: OverflowPolicy> DoubleRecorderBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<DoubleRecorder<P>, DoubleCreationError> {
-        let histogram = ConcurrentDoubleHistogram::<P>::builder()
+    pub fn build(self) -> Result<DoubleRecorderWithPolicy<P>, DoubleCreationError> {
+        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
             .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
             .significant_digits(self.number_of_significant_value_digits)
             .auto_resize(self.auto_resize)
             .build()?;
-        Ok(DoubleRecorder::from_histogram(histogram))
+        Ok(DoubleRecorderWithPolicy::from_histogram(histogram))
     }
 }
 
@@ -347,13 +351,13 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorderBuilder<P> {
     }
 
     /// Allocate both buffers and return the unique writer and sampler handles.
-    pub fn build(self) -> Result<(SingleWriterDoubleRecorder<P>, SingleWriterDoubleSampler<P>), DoubleCreationError> {
-        let histogram = DoubleHistogram::<P>::builder()
+    pub fn build(self) -> Result<(SingleWriterDoubleRecorderWithPolicy<P>, SingleWriterDoubleSamplerWithPolicy<P>), DoubleCreationError> {
+        let histogram = DoubleHistogramWithPolicy::<P>::builder()
             .highest_to_lowest_value_ratio(self.highest_to_lowest_value_ratio)
             .significant_digits(self.number_of_significant_value_digits)
             .auto_resize(self.auto_resize)
             .build()?;
-        SingleWriterDoubleRecorder::from_histogram(histogram)
+        SingleWriterDoubleRecorderWithPolicy::from_histogram(histogram)
     }
 }
 
@@ -646,14 +650,27 @@ impl SingleWriterSampler {
     }
 }
 
-impl<P: OverflowPolicy> DoubleRecorder<P> {
+impl<P: OverflowPolicy> Default for DoubleRecorderWithPolicy<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: OverflowPolicy> DoubleRecorderWithPolicy<P> {
+    /// Construct a recorder with the built-in default histogram settings.
+    pub fn new() -> Self {
+        DoubleRecorderBuilder::<P>::new()
+            .build()
+            .expect("built-in double recorder defaults must be valid")
+    }
+
     pub fn builder() -> DoubleRecorderBuilder<P> {
         DoubleRecorderBuilder::new()
     }
 
-    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogram<P>) -> Self {
+    pub fn from_histogram(mut histogram: ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
         histogram.meta_data_mut().set_start_now();
-        DoubleRecorder {
+        DoubleRecorderWithPolicy {
             instance_id: get_instance_id(),
             core: RecorderCore::from_histogram(histogram),
         }
@@ -673,6 +690,11 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
         }
     }
 
+    /// Record the measurements, then synthetic samples for coordinated omission.
+    /// Non-positive intervals disable correction. NaN, positive infinity, or a
+    /// subtraction that cannot make progress returns
+    /// [`RecordError::InvalidExpectedInterval`], retaining the actual measurements
+    /// and any synthetic samples already recorded in this interval.
     #[inline]
     pub fn record_value_with_count_and_expected_interval(
         &self,
@@ -684,18 +706,14 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
             let _csg = self.core.begin_writer_critical_section();
             let active = &*self.core.active();
             active.record_value_with_count(value, count)?;
-            if expected_interval_between_value_samples <= 0.0 {
-                return Ok(());
-            }
-            let mut missing_value = value - expected_interval_between_value_samples;
-            while missing_value >= expected_interval_between_value_samples {
-                active.record_value_with_count(missing_value, count)?;
-                missing_value -= expected_interval_between_value_samples;
-            }
-            Ok(())
+            crate::core::coordinated_omission::record_missing_double_values(value, expected_interval_between_value_samples, |missing| {
+                active.record_value_with_count(missing, count)
+            })
         }
     }
 
+    /// Count-one variant of [`Self::record_value_with_count_and_expected_interval`],
+    /// with the same interval validation and partial-recording behavior.
     #[inline]
     pub fn record_value_with_expected_interval(&self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
@@ -709,7 +727,7 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
     pub fn begin_interval_sample<'a>(&'a self) -> DoubleIntervalSample<'a, 'a, P> {
         let pfg = self.core.reader_lock();
         let active = unsafe { &*self.core.active() };
-        let fresh_histogram = ConcurrentDoubleHistogram::<P>::builder()
+        let fresh_histogram = ConcurrentDoubleHistogramWithPolicy::<P>::builder()
             .highest_to_lowest_value_ratio(active.get_highest_to_lowest_value_ratio())
             .significant_digits(active.get_number_of_significant_value_digits())
             .auto_resize(active.is_auto_resize())
@@ -721,9 +739,9 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
 
     pub(in crate::concurrent) fn perform_interval_sample<'a>(
         &self,
-        inactive_histogram: *mut ConcurrentDoubleHistogram<P>,
+        inactive_histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
         flip_guard: &PhaseFlipGuard<'a>,
-    ) -> *mut ConcurrentDoubleHistogram<P> {
+    ) -> *mut ConcurrentDoubleHistogramWithPolicy<P> {
         let now = SystemTime::now();
         unsafe { (*inactive_histogram).meta_data_mut().set_start_timestamp(now) };
         let active_histogram = self.core.swap_active(inactive_histogram);
@@ -733,22 +751,31 @@ impl<P: OverflowPolicy> DoubleRecorder<P> {
     }
 }
 
-impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
+impl<P: OverflowPolicy> SingleWriterDoubleRecorderWithPolicy<P> {
+    /// Construct paired writer and sampler handles with the built-in defaults.
+    pub fn new() -> (Self, SingleWriterDoubleSamplerWithPolicy<P>) {
+        SingleWriterDoubleRecorderBuilder::<P>::new()
+            .build()
+            .expect("built-in single-writer double recorder defaults must be valid")
+    }
+
     pub fn builder() -> SingleWriterDoubleRecorderBuilder<P> {
         SingleWriterDoubleRecorderBuilder::new()
     }
 
     /// Create the unique writer and sampler handles around an existing
     /// histogram.
-    pub fn from_histogram(mut histogram: DoubleHistogram<P>) -> Result<(Self, SingleWriterDoubleSampler<P>), DoubleCreationError> {
+    pub fn from_histogram(
+        mut histogram: DoubleHistogramWithPolicy<P>,
+    ) -> Result<(Self, SingleWriterDoubleSamplerWithPolicy<P>), DoubleCreationError> {
         let inactive_histogram = Box::new(histogram.empty_like_for_recorder());
         histogram.meta_data_mut().set_start_now();
         let core = Arc::new(RecorderCore::from_histogram(histogram));
-        let recorder = SingleWriterDoubleRecorder {
+        let recorder = SingleWriterDoubleRecorderWithPolicy {
             instance_id: get_instance_id(),
             core: Arc::clone(&core),
         };
-        let sampler = SingleWriterDoubleSampler {
+        let sampler = SingleWriterDoubleSamplerWithPolicy {
             core,
             inactive_histogram: Some(inactive_histogram),
         };
@@ -774,6 +801,11 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
         }
     }
 
+    /// Record the measurements, then synthetic samples for coordinated omission.
+    /// Non-positive intervals disable correction. NaN, positive infinity, or a
+    /// subtraction that cannot make progress returns
+    /// [`RecordError::InvalidExpectedInterval`], retaining the actual measurements
+    /// and any synthetic samples already recorded in this interval.
     #[inline]
     pub fn record_value_with_count_and_expected_interval(
         &mut self,
@@ -785,18 +817,14 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
             let _writer = self.core.begin_writer_critical_section();
             let active = &mut *self.core.active();
             active.record_value_with_count(value, count)?;
-            if expected_interval_between_value_samples <= 0.0 {
-                return Ok(());
-            }
-            let mut missing_value = value - expected_interval_between_value_samples;
-            while missing_value >= expected_interval_between_value_samples {
-                active.record_value_with_count(missing_value, count)?;
-                missing_value -= expected_interval_between_value_samples;
-            }
-            Ok(())
+            crate::core::coordinated_omission::record_missing_double_values(value, expected_interval_between_value_samples, |missing| {
+                active.record_value_with_count(missing, count)
+            })
         }
     }
 
+    /// Count-one variant of [`Self::record_value_with_count_and_expected_interval`],
+    /// with the same interval validation and partial-recording behavior.
     #[inline]
     pub fn record_value_with_expected_interval(
         &mut self,
@@ -807,7 +835,7 @@ impl<P: OverflowPolicy> SingleWriterDoubleRecorder<P> {
     }
 }
 
-impl<P: OverflowPolicy> SingleWriterDoubleSampler<P> {
+impl<P: OverflowPolicy> SingleWriterDoubleSamplerWithPolicy<P> {
     /// Begin sampling an interval from this recorder.
     ///
     /// The returned value borrows this unique sampler and owns the inactive
@@ -824,8 +852,8 @@ impl<P: OverflowPolicy> SingleWriterDoubleSampler<P> {
 
     pub(in crate::concurrent) fn perform_interval_sample(
         &mut self,
-        mut inactive_histogram: Box<DoubleHistogram<P>>,
-    ) -> Box<DoubleHistogram<P>> {
+        mut inactive_histogram: Box<DoubleHistogramWithPolicy<P>>,
+    ) -> Box<DoubleHistogramWithPolicy<P>> {
         inactive_histogram.reset();
         let now = SystemTime::now();
         inactive_histogram.meta_data_mut().set_start_timestamp(now);
@@ -841,7 +869,7 @@ impl<P: OverflowPolicy> SingleWriterDoubleSampler<P> {
         sampled_histogram
     }
 
-    pub(in crate::concurrent) fn return_inactive(&mut self, histogram: Box<DoubleHistogram<P>>) {
+    pub(in crate::concurrent) fn return_inactive(&mut self, histogram: Box<DoubleHistogramWithPolicy<P>>) {
         assert!(
             self.inactive_histogram.replace(histogram).is_none(),
             "single-writer double sampler already owns an inactive histogram"

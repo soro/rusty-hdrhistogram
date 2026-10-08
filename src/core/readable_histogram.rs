@@ -6,8 +6,9 @@ pub(crate) mod sealed {
     impl<T: super::ReadableHistogram + ?Sized> Sealed for &T {}
 }
 
-#[doc(hidden)]
-pub trait ReadableHistogram: sealed::Sealed {
+// Keep the unchecked indexing contract inside the crate. Merely hiding this
+// trait from rustdoc would still expose its methods through public supertraits.
+pub(crate) trait ReadableHistogram: sealed::Sealed {
     // required for iteration
     fn settings(&self) -> HistogramSettings;
     fn array_length(&self) -> u32;
@@ -35,6 +36,16 @@ pub trait ReadableHistogram: sealed::Sealed {
 ///
 /// Live concurrent histograms intentionally do not implement this trait; obtain
 /// a recorder sample/snapshot before iterating them.
+///
+/// The internal unchecked read interface is not part of this public trait:
+///
+/// ```compile_fail,E0624
+/// use hdrhistogram::iteration::IterableHistogram;
+/// fn unchecked_read<H: IterableHistogram>(histogram: &H) -> u64 {
+///     histogram.unsafe_get_count_at_index(u32::MAX)
+/// }
+/// ```
+#[allow(private_bounds)] // Public capability marker for the crate-private read interface.
 pub trait IterableHistogram: ReadableHistogram {}
 
 /// Histogram data that can be encoded without mixing structural epochs.
@@ -45,6 +56,14 @@ pub trait IterableHistogram: ReadableHistogram {}
 /// Captured concurrent read views are structurally stable, but they may still
 /// expose live count cells. Use recorder samples/snapshots when the encoded
 /// histogram must represent a frozen count set.
+///
+/// ```compile_fail,E0624
+/// use hdrhistogram::encoding::EncodableHistogram;
+/// fn unchecked_read<H: EncodableHistogram>(histogram: &H) -> u64 {
+///     histogram.unsafe_get_count_at_index(u32::MAX)
+/// }
+/// ```
+#[allow(private_bounds)] // Public capability marker for the crate-private read interface.
 pub trait EncodableHistogram: ReadableHistogram {}
 
 impl<T: ReadableHistogram + ?Sized> ReadableHistogram for &T {

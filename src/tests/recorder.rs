@@ -1,7 +1,7 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::{
     DoubleRecorder, FixedRecorder, ResizableConcurrentHistogram, ResizableRecorder, SaturatingDoubleRecorder,
-    SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder, SingleWriterDoubleSampler, SingleWriterRecorder,
+    SaturatingSingleWriterDoubleRecorder, SingleWriterDoubleRecorder, SingleWriterRecorder,
 };
 use crate::core::constants::ORIGINAL_MIN;
 use crate::core::*;
@@ -42,8 +42,27 @@ fn static_recorder() {
 }
 
 #[test]
+fn double_recorder_default_constructors_need_no_type_context() {
+    let recorder = DoubleRecorder::new();
+    recorder.record_value(42.0).unwrap();
+    assert_eq!(1, recorder.begin_interval_sample().snapshot().get_total_count());
+
+    let saturating = SaturatingDoubleRecorder::new();
+    saturating.record_value(f64::MAX).unwrap();
+    assert_eq!(1, saturating.begin_interval_sample().snapshot().get_total_count());
+
+    let (mut writer, mut sampler) = SingleWriterDoubleRecorder::new();
+    writer.record_value(42.0).unwrap();
+    assert_eq!(1, sampler.begin_interval_sample().snapshot().get_total_count());
+
+    let (mut saturating_writer, mut saturating_sampler) = SaturatingSingleWriterDoubleRecorder::new();
+    saturating_writer.record_value(f64::MAX).unwrap();
+    assert_eq!(1, saturating_sampler.begin_interval_sample().snapshot().get_total_count());
+}
+
+#[test]
 fn double_recorder_records_and_resamples() {
-    let recorder: DoubleRecorder = DoubleRecorder::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -74,7 +93,7 @@ fn double_recorder_records_and_resamples() {
 
 #[test]
 fn double_recorder_interval_timestamps_are_contiguous() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -96,7 +115,7 @@ fn double_recorder_interval_timestamps_are_contiguous() {
 
 #[test]
 fn double_recorder_preserves_counts_across_conversion_ratio_changes() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -115,7 +134,7 @@ fn double_recorder_preserves_counts_across_conversion_ratio_changes() {
 
 #[test]
 fn double_recorder_snapshot_is_stable_after_resample() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder().significant_digits(2).build().unwrap();
+    let recorder = DoubleRecorder::builder().significant_digits(2).build().unwrap();
 
     succ!(recorder.record_value_with_expected_interval(100.0, 25.0));
     let mut sample = recorder.begin_interval_sample();
@@ -184,7 +203,7 @@ fn single_writer_recorder_interval_timestamps_are_contiguous() {
 
 #[test]
 fn single_writer_double_recorder_interval_timestamps_are_contiguous() {
-    let (mut recorder, mut sampler): (SingleWriterDoubleRecorder, SingleWriterDoubleSampler) = SingleWriterDoubleRecorder::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -311,7 +330,7 @@ fn single_writer_recorder_can_sample_while_single_writer_runs() {
 
 #[test]
 fn single_writer_double_recorder_records_and_resamples() {
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -338,7 +357,7 @@ fn single_writer_double_recorder_records_and_resamples() {
 
 #[test]
 fn single_writer_double_recorder_from_histogram_returns_both_handles() {
-    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::builder()
+    let mut histogram = DoubleHistogram::builder()
         .highest_to_lowest_value_ratio(1_024)
         .significant_digits(2)
         .build()
@@ -358,7 +377,7 @@ fn single_writer_double_recorder_from_histogram_returns_both_handles() {
 
 #[test]
 fn single_writer_double_sample_encodes_with_ratio_and_counts() {
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1_024)
         .significant_digits(2)
         .build()
@@ -382,10 +401,7 @@ fn single_writer_double_sample_encodes_with_ratio_and_counts() {
 #[test]
 fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
     const ITERATIONS: usize = 20_000;
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
-        .significant_digits(2)
-        .build()
-        .unwrap();
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder().significant_digits(2).build().unwrap();
     let ready = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
 
@@ -426,7 +442,7 @@ fn single_writer_double_recorder_can_sample_while_single_writer_runs() {
 
 #[test]
 fn single_writer_double_recorder_preserves_shifted_range_across_samples() {
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -444,7 +460,7 @@ fn single_writer_double_recorder_preserves_shifted_range_across_samples() {
 
 #[test]
 fn single_writer_double_buffers_retain_expanded_ratio_when_recycled() {
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1_024)
         .significant_digits(2)
         .build()
@@ -582,7 +598,7 @@ fn single_writer_recorder_preserves_auto_resize_disabled_across_samples() {
 
 #[test]
 fn double_recorder_preserves_auto_resize_disabled_across_samples() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .auto_resize(false)
@@ -606,7 +622,7 @@ fn double_recorder_preserves_auto_resize_disabled_across_samples() {
 
 #[test]
 fn single_writer_double_recorder_preserves_auto_resize_disabled_across_samples() {
-    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::<ThrowOnOverflow>::builder()
+    let (mut recorder, mut sampler) = SingleWriterDoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .auto_resize(false)

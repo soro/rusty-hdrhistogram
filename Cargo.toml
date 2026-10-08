@@ -17,11 +17,12 @@ flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"], op
 base64 = { version = "0.22", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 clap = { version = "4.6.1", features = ["derive"], optional = true }
+same-file = { version = "1.0", optional = true }
 
 [features]
 encoding-compression = ["dep:flate2"]
 encoding-base64 = ["dep:base64", "dep:chrono", "encoding-compression"]
-cli = ["dep:clap", "encoding-base64"]
+cli = ["dep:clap", "dep:same-file", "encoding-base64"]
 loom-tests = []
 
 [dev-dependencies]

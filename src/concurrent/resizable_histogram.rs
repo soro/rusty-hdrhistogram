@@ -1,5 +1,5 @@
 use crate::concurrent::concurrent_util;
-use crate::concurrent::inline_backing_array::InlineBackingArray;
+use crate::concurrent::inline_backing_array::{AtomicInlineBackingArray, InlineBackingArray};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::snapshot::{ResizableSnapshot, Snapshot};
 use crate::concurrent::writer_reader_phaser::{PhaseFlipGuard, WriterReaderPhaser};
@@ -9,8 +9,8 @@ use crate::iteration::{AllValuesIterator, LinearIterator, LogarithmicIterator, P
 use crossbeam_epoch as epoch;
 use std::ptr;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 #[repr(C)]
 pub struct ResizableConcurrentHistogram {
@@ -21,8 +21,8 @@ pub struct ResizableConcurrentHistogram {
     raw_max_value: AtomicU64,
     raw_min_non_zero_value: AtomicU64,
     total_count: AtomicU64,
-    pub(in crate::concurrent) active_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
-    inactive_counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
+    pub(in crate::concurrent) active_counts: AtomicInlineBackingArray<AtomicU64>,
+    inactive_counts: AtomicInlineBackingArray<AtomicU64>,
 }
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
@@ -112,6 +112,21 @@ pub struct ResizableConcurrentReadView<'a> {
     min_non_zero_value: u64,
 }
 
+/// Borrowed counts from a sampled-out histogram, with no structural lock or
+/// epoch guard. Its owner must keep the histogram frozen for this lifetime.
+pub(super) struct FrozenResizableView<'a> {
+    active_counts: &'a InlineBackingArray<AtomicU64>,
+    inactive_counts: &'a InlineBackingArray<AtomicU64>,
+    meta_data: &'a HistogramMetaData,
+    settings: HistogramSettings,
+    active_normalizing_index_offset: i32,
+    inactive_normalizing_index_offset: i32,
+    integer_to_double_value_conversion_ratio: f64,
+    total_count: u64,
+    max_value: u64,
+    min_non_zero_value: u64,
+}
+
 pub(crate) struct ResizableStructuralMutation<'a> {
     histogram: &'a ResizableConcurrentHistogram,
     guard: PhaseFlipGuard<'a>,
@@ -121,8 +136,8 @@ impl Drop for ResizableConcurrentHistogram {
     fn drop(&mut self) {
         unsafe {
             self.wrp.reader_lock().flip();
-            (*self.active_counts.load(Ordering::SeqCst)).dealloc();
-            (*self.inactive_counts.load(Ordering::SeqCst)).dealloc();
+            InlineBackingArray::dealloc(self.active_counts.load(Ordering::SeqCst));
+            InlineBackingArray::dealloc(self.inactive_counts.load(Ordering::SeqCst));
         }
     }
 }
@@ -165,8 +180,8 @@ impl ResizableConcurrentHistogram {
                 raw_max_value: AtomicU64::new(ORIGINAL_MAX),
                 raw_min_non_zero_value: AtomicU64::new(ORIGINAL_MIN),
                 total_count: AtomicU64::new(0),
-                active_counts: AtomicPtr::new(active_array_ptr),
-                inactive_counts: AtomicPtr::new(inactive_array_ptr),
+                active_counts: AtomicInlineBackingArray::new(active_array_ptr),
+                inactive_counts: AtomicInlineBackingArray::new(inactive_array_ptr),
             })
         }
     }
@@ -178,7 +193,7 @@ impl ResizableConcurrentHistogram {
     unsafe fn retire_counts_array(ptr: *mut InlineBackingArray<AtomicU64>, guard: &epoch::Guard) {
         unsafe {
             guard.defer_unchecked(move || {
-                (*ptr).dealloc();
+                InlineBackingArray::dealloc(ptr);
             });
         }
     }
@@ -226,6 +241,35 @@ impl ResizableConcurrentHistogram {
                     .layout
                     .get_min_non_zero_value(self.raw_min_non_zero_value.load(Ordering::Relaxed)),
             }
+        }
+    }
+
+    /// # Safety
+    /// All writers/structural mutations must have completed and the histogram
+    /// must not be recorded into, resized, shifted or reset for the returned
+    /// view's lifetime. A completed recorder sample supplies this guarantee.
+    pub(super) unsafe fn frozen_view(&self) -> FrozenResizableView<'_> {
+        // The sampled histogram owns both current allocations until it is
+        // recycled or dropped. The sample borrow prevents either event, so
+        // these references need neither a structural lock nor epoch pinning.
+        let active_counts = unsafe { &*self.active_counts.load(Ordering::Acquire) };
+        let inactive_counts = unsafe { &*self.inactive_counts.load(Ordering::Relaxed) };
+        debug_assert_eq!(active_counts.length(), inactive_counts.length());
+        FrozenResizableView {
+            active_counts,
+            inactive_counts,
+            meta_data: &self.meta_data,
+            settings: self
+                .layout
+                .settings_snapshot(active_counts.metadata(), self.auto_resize.load(Ordering::Relaxed)),
+            active_normalizing_index_offset: active_counts.normalizing_index_offset(),
+            inactive_normalizing_index_offset: inactive_counts.normalizing_index_offset(),
+            integer_to_double_value_conversion_ratio: active_counts.integer_to_double_value_conversion_ratio(),
+            total_count: self.total_count.load(Ordering::Relaxed),
+            max_value: self.layout.get_max_value(self.raw_max_value.load(Ordering::Relaxed)),
+            min_non_zero_value: self
+                .layout
+                .get_min_non_zero_value(self.raw_min_non_zero_value.load(Ordering::Relaxed)),
         }
     }
 
@@ -773,7 +817,8 @@ impl ResizableConcurrentHistogram {
             new_integer_to_double_value_conversion_ratio,
         )?;
 
-        self.swap_active_inactive();
+        // The structural guard keeps both allocations alive during the swap.
+        unsafe { self.swap_active_inactive() };
         flip_guard.flip();
 
         let inactive_counts = unsafe { &*self.inactive_counts.load(Ordering::Relaxed) };
@@ -785,7 +830,7 @@ impl ResizableConcurrentHistogram {
             new_integer_to_double_value_conversion_ratio,
         )?;
 
-        self.swap_active_inactive();
+        unsafe { self.swap_active_inactive() };
         flip_guard.flip();
 
         Ok(())
@@ -922,7 +967,8 @@ impl ResizableConcurrentHistogram {
         }
     }
 
-    fn swap_active_inactive(&self) {
+    // Caller holds the structural lock, keeping both allocations alive.
+    unsafe fn swap_active_inactive(&self) {
         let active_ptr = self.active_counts.load(Ordering::Relaxed);
         let inactive_ptr = self.inactive_counts.load(Ordering::Relaxed);
         // Publish the prepared inactive array, including its offset and double
@@ -1215,6 +1261,53 @@ impl ReadableHistogram for ResizableConcurrentReadView<'_> {
 }
 
 impl EncodableHistogram for ResizableConcurrentReadView<'_> {}
+
+impl FrozenResizableView<'_> {
+    pub(super) fn get_min_non_zero_value(&self) -> u64 {
+        self.min_non_zero_value
+    }
+}
+
+impl crate::core::readable_histogram::sealed::Sealed for FrozenResizableView<'_> {}
+
+impl ReadableHistogram for FrozenResizableView<'_> {
+    fn settings(&self) -> HistogramSettings {
+        self.settings.clone()
+    }
+
+    fn array_length(&self) -> u32 {
+        self.active_counts.length()
+    }
+
+    fn get_total_count(&self) -> u64 {
+        self.total_count
+    }
+
+    fn unsafe_get_count_at_index(&self, index: u32) -> u64 {
+        let active_index = util::normalize_index(index, self.active_normalizing_index_offset, self.active_counts.length());
+        let inactive_index = util::normalize_index(index, self.inactive_normalizing_index_offset, self.inactive_counts.length());
+        unsafe {
+            self.active_counts.get_unchecked(active_index).load(Ordering::Relaxed)
+                + self.inactive_counts.get_unchecked(inactive_index).load(Ordering::Relaxed)
+        }
+    }
+
+    fn get_max_value(&self) -> u64 {
+        self.max_value
+    }
+
+    fn meta_data(&self) -> &HistogramMetaData {
+        self.meta_data
+    }
+
+    fn integer_to_double_value_conversion_ratio(&self) -> f64 {
+        self.integer_to_double_value_conversion_ratio
+    }
+
+    fn normalizing_index_offset(&self) -> i32 {
+        self.active_normalizing_index_offset
+    }
+}
 
 impl ConstructableHistogram for ResizableConcurrentHistogram {
     fn new(lowest_discernible_value: u64, highest_trackable_value: u64, significant_value_digits: u8) -> Result<Self, CreationError> {

@@ -212,10 +212,18 @@ fn process_log(args: ProcessArgs) -> CliResult<()> {
     };
 
     if let Some(output_prefix) = output_prefix {
-        let mut interval_log = BufWriter::new(File::create(&output_prefix)?);
-        let mut percentile_distribution = BufWriter::new(File::create(suffixed_path(&output_prefix, "hgrm"))?);
+        let percentile_path = suffixed_path(&output_prefix, "hgrm");
+        let moving_window_path = suffixed_path(&output_prefix, "mwp");
+        let mut outputs = vec![output_prefix.as_path(), percentile_path.as_path()];
         if config.moving_window.is_some() {
-            let mut moving_window_log = BufWriter::new(File::create(suffixed_path(&output_prefix, "mwp"))?);
+            outputs.push(moving_window_path.as_path());
+        }
+        validate_output_paths(args.input.as_deref(), &outputs)?;
+
+        let mut interval_log = BufWriter::new(File::create(&output_prefix)?);
+        let mut percentile_distribution = BufWriter::new(File::create(&percentile_path)?);
+        if config.moving_window.is_some() {
+            let mut moving_window_log = BufWriter::new(File::create(&moving_window_path)?);
             write_histogram_log_report(
                 reader,
                 &config,
@@ -223,6 +231,7 @@ fn process_log(args: ProcessArgs) -> CliResult<()> {
                 &mut percentile_distribution,
                 Some(&mut moving_window_log),
             )?;
+            moving_window_log.flush()?;
         } else {
             write_histogram_log_report(
                 reader,
@@ -232,6 +241,8 @@ fn process_log(args: ProcessArgs) -> CliResult<()> {
                 None::<&mut io::Sink>,
             )?;
         }
+        interval_log.flush()?;
+        percentile_distribution.flush()?;
         return Ok(());
     }
 
@@ -245,6 +256,7 @@ fn process_log(args: ProcessArgs) -> CliResult<()> {
         &mut percentile_distribution,
         None::<&mut io::Sink>,
     )?;
+    percentile_distribution.flush()?;
     Ok(())
 }
 
@@ -376,6 +388,7 @@ fn filter(args: FilterArgs) -> CliResult<()> {
     let mut stdout_lock;
     let mut file_output;
     let out: &mut dyn Write = if let Some(path) = args.output.as_deref() {
+        validate_output_paths(args.input.input.as_deref(), &[path])?;
         file_output = BufWriter::new(File::create(path)?);
         &mut file_output
     } else {
@@ -395,6 +408,41 @@ fn filter(args: FilterArgs) -> CliResult<()> {
                 }
             }
         }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+// Preflight every output before truncating any of them. File identity catches
+// relative paths, symlinks and hard links, including redirected file input.
+// This guards accidental aliases, not concurrent filesystem path replacement.
+fn validate_output_paths(input_path: Option<&Path>, output_paths: &[&Path]) -> CliResult<()> {
+    let input = match input_path {
+        Some(path) if path.metadata()?.is_file() => Some(same_file::Handle::from_path(path)?),
+        Some(_) => None,
+        None => Some(same_file::Handle::stdin()?),
+    };
+    let mut existing_outputs = Vec::new();
+    for &path in output_paths {
+        match path.metadata() {
+            // Pipes and devices aren't truncated, and opening them just for
+            // validation could block. Only regular files need this check.
+            Ok(metadata) if !metadata.is_file() => continue,
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        }
+        // Do not require read permission on an output that is write-only.
+        let output = same_file::Handle::from_file(File::options().write(true).open(path)?)?;
+        if input.as_ref() == Some(&output) {
+            return Err(format!("output '{}' refers to the input file", path.display()).into());
+        }
+        for (previous_path, previous_output) in &existing_outputs {
+            if previous_output == &output {
+                return Err(format!("outputs '{}' and '{}' refer to the same file", previous_path, path.display()).into());
+            }
+        }
+        existing_outputs.push((path.display(), output));
     }
     Ok(())
 }

@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `.significant_digits(3)` call keeps roughly three decimal significant digits of
 precision. Use
 `hdrhistogram::st::HistogramWithCounter::<u32>::builder().significant_digits(3)` when narrower counters are useful.
+The `Counter` trait is sealed: only `u32` and `u64` are supported.
 
 ## Fast Fixed-Range Histograms
 
@@ -79,9 +80,7 @@ stored in long-lived owner structs rather than casually copying them around.
 use hdrhistogram::DoubleHistogram;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut histogram: DoubleHistogram = DoubleHistogram::builder()
-        .significant_digits(3)
-        .build()?;
+    let mut histogram = DoubleHistogram::new();
     histogram.record_value(1.5)?;
     histogram.record_value_with_count(10.0, 2)?;
 
@@ -98,7 +97,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `DoubleHistogram` returns an error when a finite value cannot be represented.
 `SaturatingDoubleHistogram` clamps slot selection for finite out-of-range
 values. Double histograms use an internal integer histogram and automatically
-shift their covered range as values move across orders of magnitude.
+shift their covered range as values move across orders of magnitude. `new()`
+uses the built-in defaults; use `builder()` only when configuring precision,
+dynamic range, or auto-resize behavior.
 
 ## Concurrent Recording
 
@@ -139,6 +140,16 @@ Available recorder builders include:
 - `SaturatingDoubleRecorder::builder()`
 - `SingleWriterDoubleRecorder::builder()`
 - `SaturatingSingleWriterDoubleRecorder::builder()`
+
+The double-valued variants also have infallible default constructors. The
+single-writer constructor returns its two handles directly:
+
+```rust
+use hdrhistogram::{DoubleRecorder, SingleWriterDoubleRecorder};
+
+let recorder = DoubleRecorder::new();
+let (mut writer, mut sampler) = SingleWriterDoubleRecorder::new();
+```
 
 The single-writer builders return two unique handles and allocate both backing
 histograms up front:
@@ -182,7 +193,10 @@ snapshots, and captured read views rather than direct live histogram iterators.
 The double recorder uses `ConcurrentDoubleHistogram` and the same
 `begin_interval_sample().resample()` workflow. Its samples expose a read-only
 `ConcurrentDoubleSnapshot`, so sampled interval data can be queried, iterated,
-and encoded without exposing recording or reset methods.
+and encoded without exposing recording or reset methods. These frozen snapshots
+borrow the sampled buffers without taking structural locks: multiple iterators,
+queries, and encoders can coexist. The borrow prevents recycling or dropping
+the sample while any of them still uses its data.
 
 Direct concurrent histogram types live under `hdrhistogram::concurrent`:
 
@@ -190,7 +204,7 @@ Direct concurrent histogram types live under `hdrhistogram::concurrent`:
 use hdrhistogram::concurrent::ConcurrentDoubleHistogram;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let histogram: ConcurrentDoubleHistogram = ConcurrentDoubleHistogram::builder()
+    let histogram = ConcurrentDoubleHistogram::builder()
         .significant_digits(3)
         .highest_to_lowest_value_ratio(1_024)
         .build()?;
@@ -229,6 +243,15 @@ stable interval.
 Live concurrent read-view iterators are fallible: use `try_next()` and handle
 `IterationError::ConcurrentModification` if writers record after the view is
 captured.
+
+Concurrent double-histogram `add()` operations do not impose a global lock
+order. Opposing additions such as `a.add(&b)` and `b.add(&a)`, or a cycle of
+additions involving more histograms, can deadlock: each operation holds a source
+read view while recording into its destination, which may need a structural
+lock for a range shift or resize. This is an accepted limitation. Externally
+serialize cross-histogram additions that could form a cycle, or copy each source
+into independent storage and release its live read view before merging. This
+limitation concerns cross-histogram addition, not ordinary concurrent recording.
 
 ## Encoding And Logs
 
@@ -282,6 +305,11 @@ Java-style `HistogramLogProcessor` arguments are also accepted at the top level:
 cargo run --features cli --bin hdrhistogram -- -csv -i latency.hlog -o latency -outputValueUnitRatio 1000000
 ```
 
+File outputs are flushed before reporting success. The CLI rejects existing
+output files that alias the input or another report output (including symlinks
+and hard links); in-place log processing is not supported. This preflight check
+does not protect against another process replacing paths during the command.
+
 ## Java Compatibility Notes
 
 The V2 binary encoding and histogram-log formats are intended to be compatible
@@ -301,6 +329,21 @@ with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
   corrected double-histogram target with auto-resize disabled. Fixed-range Rust
   copies remain fixed and can still return an out-of-range error; auto-resizing
   Rust copies can shift/grow while replaying corrected values.
+- Floating-point coordinated-omission correction checks that every synthetic
+  sample is strictly smaller than the preceding value. Java's subtraction loop
+  can run forever when a positive interval is too small to change the value
+  after rounding. Rust returns `RecordError::InvalidExpectedInterval` instead,
+  also rejecting NaN and positive-infinite intervals. The actual measurement
+  and any earlier synthetic samples remain recorded; correction is not
+  transactional. Non-positive intervals still disable correction, as in Java.
+  These checks do not affect ordinary recording.
+- Double-histogram decoding validates the actual integer backing layout instead
+  of reapplying Java's conservative constructor ratio limit. This permits
+  round-tripping valid auto-grown histograms whose range exceeds that limit;
+  Java may reject these encodings. Overflowing or inconsistent layouts are
+  still rejected. Public constructor limits and recording behavior are
+  unchanged; constructor-based buffer recreation is not covered by this
+  decoding exception.
 - Rust avoids a Java double-histogram range-shift bug where the high-side shift
   path can scale the published range twice. This preserves the pre-shift value
   mapping instead of matching Java's current corrupting edge behavior.
@@ -320,6 +363,20 @@ with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
 - Zero-count records follow the Java-style mutation path. Calling
   `record_value_with_count(value, 0)` can update range/min/max tracking even
   though the total count does not increase.
+- Subtraction can partially modify counts before reporting an insufficient
+  bucket count, following Java's fused validation/subtraction approach. Rust
+  repairs total/min/max tracking on this error path so the remaining histogram
+  stays internally consistent; subtraction is not transactional.
+- Decoding rejects normalizing index offsets that are not aligned to a
+  half-bucket. Valid range shifts always preserve this alignment; rejecting
+  malformed offsets at the input boundary keeps internal indexing unchecked.
+- Compressed decoding requires a complete zlib stream with a valid checksum and
+  exactly one histogram payload. Truncated trailers, extra inflated bytes, and
+  trailing compressed data inside the declared frame are rejected. Java may
+  accept truncated or padded streams because it stops after inflating the
+  expected payload without requiring stream completion. Valid Java encodings
+  remain supported. Decompression output stays bounded by the validated
+  histogram layout/payload length; arbitrary padding is not drained.
 - Unlike Java, adding a newly constructed or reset empty histogram leaves the
   destination's count and range tracking unchanged, and resetting a histogram
   restores an exact empty max value of zero. Java's compatible-layout `add()`
@@ -355,13 +412,12 @@ should use `Histogram`, `DoubleHistogram`, and the recorder types. Concurrent
 histogram, builder, policy, snapshot, and read-view types remain available from
 the `st` and `concurrent` modules when needed.
 
-The policy-bearing floating-point types are generic with
-`ThrowOnOverflow` as their default policy: `DoubleHistogram<P>`,
-`ConcurrentDoubleHistogram<P>`, `DoubleRecorder<P>`, and
-`SingleWriterDoubleRecorder<P>`. The `Saturating*` aliases select
-`SaturateOnOverflow`. Rust may need either a contextual type annotation (as in
-the double-histogram examples above) or an explicit `::<ThrowOnOverflow>` when
-an associated builder call does not otherwise constrain `P`.
+The ordinary floating-point names are aliases using throwing overflow behavior;
+the corresponding `Saturating*` aliases select saturating behavior. Both sets of
+aliases support the same `new()` and `builder()` calls without policy type
+annotations. Lower-level `*WithPolicy` types remain available from the `st` and
+`concurrent` modules for generic library code, but the built-in policies cover
+the two distinct behaviors supported by this crate.
 
 ## Iteration
 

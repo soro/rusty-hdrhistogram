@@ -43,8 +43,7 @@ pub use crate::concurrent::{
     SaturatingSingleWriterDoubleSampler, SingleWriterDoubleRecorder, SingleWriterDoubleSampler, SingleWriterRecorder, SingleWriterSampler,
 };
 pub use crate::core::{
-    CreationError, DoubleCreationError, HistogramMetaData, HistogramSettings, OverflowPolicy, RecordError, SaturateOnOverflow, ShiftError,
-    SubtractionError, ThrowOnOverflow,
+    CreationError, DoubleCreationError, HistogramMetaData, HistogramSettings, RecordError, ShiftError, SubtractionError,
 };
 pub use crate::iteration::IterationError;
 pub use crate::st::{DoubleHistogram, Histogram, SaturatingDoubleHistogram};

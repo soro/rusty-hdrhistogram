@@ -724,6 +724,8 @@ impl<T: Counter> HistogramWithCounter<T> {
         Ok(())
     }
 
+    /// Subtracts counts, retaining any earlier bucket subtractions if a later
+    /// bucket has insufficient counts. Tracking remains consistent on error.
     pub fn subtract<B: Borrow<HistogramWithCounter<T>>>(&mut self, other_histogram: B) -> Result<(), SubtractionError> {
         let other_histogram = other_histogram.borrow();
 
@@ -741,7 +743,7 @@ impl<T: Counter> HistogramWithCounter<T> {
             if other_count != T::zero() {
                 let other_value = other_histogram.value_from_index(i);
                 if self.get_count_at_value(other_value).unwrap() < other_count {
-                    return Err(SubtractionError::CountExceededAtValue);
+                    return Err(self.repair_tracking_after_failed_subtraction());
                 }
                 let idx = self.layout.counts_array_index(other_value);
                 let normalized_index = self.normalize_index(idx);
@@ -753,6 +755,13 @@ impl<T: Counter> HistogramWithCounter<T> {
         self.establish_internal_tracking_values();
 
         Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn repair_tracking_after_failed_subtraction(&mut self) -> SubtractionError {
+        self.establish_internal_tracking_values();
+        SubtractionError::CountExceededAtValue
     }
 
     fn establish_internal_tracking_values(&mut self) {

@@ -1,9 +1,10 @@
 use crate::concurrent::recordable_histogram::RecordableHistogram;
+use crate::concurrent::resizable_histogram::FrozenResizableView;
 use crate::concurrent::{ResizableConcurrentHistogram, ResizableConcurrentReadView, ResizableStructuralMutation};
 use crate::core::util;
 use crate::core::{
-    DoubleCreationError, EncodableHistogram, HistogramMetaData, HistogramSettings, OverflowPolicy, ReadableHistogram, RecordError,
-    SaturateOnOverflow, ThrowOnOverflow,
+    DoubleCreationError, EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram, OverflowPolicy, ReadableHistogram,
+    RecordError, SaturateOnOverflow, ThrowOnOverflow,
 };
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
@@ -77,7 +78,7 @@ fn derive_integer_value_range(external_ratio: u64, significant_value_digits: u8)
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
-pub struct ConcurrentDoubleHistogram<P: OverflowPolicy = ThrowOnOverflow> {
+pub struct ConcurrentDoubleHistogramWithPolicy<P: OverflowPolicy> {
     integer_histogram: ResizableConcurrentHistogram,
     configured_highest_to_lowest_value_ratio: AtomicU64,
     current_lowest_value_in_auto_range: AtomicU64,
@@ -130,8 +131,8 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogramBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<ConcurrentDoubleHistogram<P>, DoubleCreationError> {
-        let histogram = ConcurrentDoubleHistogram::<P>::with_highest_to_lowest_value_ratio(
+    pub fn build(self) -> Result<ConcurrentDoubleHistogramWithPolicy<P>, DoubleCreationError> {
+        let histogram = ConcurrentDoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
             self.highest_to_lowest_value_ratio,
             self.number_of_significant_value_digits,
         )?;
@@ -160,11 +161,32 @@ pub struct ConcurrentDoubleReadView<'a> {
 /// Recorder samples return this wrapper so sampled interval data can be queried
 /// and iterated without exposing the underlying concurrent histogram's
 /// writer-side mutation methods.
+/// Queries and iterators borrow frozen counts and do not acquire structural
+/// locks. Several iterators, queries and encoders may be used together.
+///
+/// The sample cannot be recycled while a snapshot or its iterator is in use:
+///
+/// ```compile_fail,E0505
+/// use hdrhistogram::DoubleRecorder;
+/// let recorder = DoubleRecorder::new();
+/// recorder.record_value(42.0).unwrap();
+/// let sample = recorder.begin_interval_sample();
+/// let snapshot = sample.snapshot();
+/// let mut values = snapshot.recorded_values();
+/// let next_sample = sample.resample();
+/// let next_value = values.next();
+/// ```
 pub struct ConcurrentDoubleSnapshot<'a, P: OverflowPolicy> {
-    histogram: &'a ConcurrentDoubleHistogram<P>,
+    integer_view: FrozenResizableView<'a>,
+    configured_highest_to_lowest_value_ratio: u64,
+    current_lowest_value_in_auto_range: f64,
+    current_highest_value_limit_in_auto_range: f64,
+    auto_resize: bool,
+    _policy: PhantomData<&'a P>,
 }
 
-pub type SaturatingConcurrentDoubleHistogram = ConcurrentDoubleHistogram<SaturateOnOverflow>;
+pub type ConcurrentDoubleHistogram = ConcurrentDoubleHistogramWithPolicy<ThrowOnOverflow>;
+pub type SaturatingConcurrentDoubleHistogram = ConcurrentDoubleHistogramWithPolicy<SaturateOnOverflow>;
 
 struct RangeShiftGate<'a> {
     range_shift_in_progress: &'a AtomicBool,
@@ -299,119 +321,185 @@ impl ConcurrentDoubleReadView<'_> {
 }
 
 impl<'a, P: OverflowPolicy> ConcurrentDoubleSnapshot<'a, P> {
-    pub(crate) fn new(histogram: &'a ConcurrentDoubleHistogram<P>) -> Self {
-        ConcurrentDoubleSnapshot { histogram }
+    /// # Safety
+    /// The recorder must have sampled this histogram out and drained all of
+    /// its writers. It must remain frozen for the entire returned lifetime.
+    pub(super) unsafe fn new(histogram: &'a ConcurrentDoubleHistogramWithPolicy<P>) -> Self {
+        ConcurrentDoubleSnapshot {
+            integer_view: unsafe { histogram.integer_histogram.frozen_view() },
+            configured_highest_to_lowest_value_ratio: histogram.configured_highest_to_lowest_value_ratio.load(Ordering::Relaxed),
+            current_lowest_value_in_auto_range: histogram.current_lowest_value_in_auto_range(),
+            current_highest_value_limit_in_auto_range: histogram.current_highest_value_limit_in_auto_range(),
+            auto_resize: histogram.auto_resize.load(Ordering::Relaxed),
+            _policy: PhantomData,
+        }
     }
 
-    pub fn read_view(&self) -> ConcurrentDoubleReadView<'_> {
-        self.histogram.read_view()
+    /// Reborrow this frozen snapshot. Unlike a live histogram's read view,
+    /// this does not acquire a structural lock or an epoch guard.
+    pub fn read_view(&self) -> &Self {
+        self
     }
 
     pub fn meta_data(&self) -> &HistogramMetaData {
-        self.histogram.meta_data()
+        self.integer_view.meta_data()
     }
 
     pub fn settings(&self) -> HistogramSettings {
-        self.read_view().settings()
+        ReadableHistogram::settings(self)
     }
 
     pub fn get_count_at_value(&self, value: f64) -> u64 {
-        self.histogram.get_count_at_value(value)
+        let integer_value = to_integer_value_clamped_for_histogram(self, value);
+        let idx = self.settings().counts_array_index(integer_value).min(self.array_length() - 1);
+        self.unsafe_get_count_at_index(idx)
     }
 
     pub fn get_total_count(&self) -> u64 {
-        self.histogram.get_total_count()
+        self.integer_view.get_total_count()
     }
 
     pub fn get_min_value(&self) -> f64 {
-        self.histogram.get_min_value()
+        if self.get_total_count() == 0 || self.integer_view.unsafe_get_count_at_index(0) != 0 {
+            0.0
+        } else {
+            self.settings().lowest_equivalent_value(self.integer_view.get_min_non_zero_value()) as f64
+                * self.integer_to_double_value_conversion_ratio()
+        }
     }
 
     pub fn get_max_value(&self) -> f64 {
-        self.histogram.get_max_value()
+        highest_equivalent_value_for_histogram(
+            self,
+            self.integer_view.get_max_value() as f64 * self.integer_to_double_value_conversion_ratio(),
+        )
     }
 
     pub fn try_get_mean(&self) -> Result<f64, crate::iteration::IterationError> {
-        self.histogram.try_get_mean()
+        let mut iterator = RecordedValuesIterator::new(self);
+        RecordedValuesIterator::try_get_mean_without_reset(&mut iterator).map(|mean| mean * self.integer_to_double_value_conversion_ratio())
     }
 
     pub fn try_get_std_deviation(&self) -> Result<f64, crate::iteration::IterationError> {
-        self.histogram.try_get_std_deviation()
+        let mut iterator = RecordedValuesIterator::new(self);
+        RecordedValuesIterator::try_get_std_deviation_without_reset(&mut iterator)
+            .map(|std_deviation| std_deviation * self.integer_to_double_value_conversion_ratio())
     }
 
     pub fn get_value_at_percentile(&self, percentile: f64) -> f64 {
-        self.histogram.get_value_at_percentile(percentile)
+        get_value_at_percentile_for_histogram(self, percentile) as f64 * self.integer_to_double_value_conversion_ratio()
     }
 
     pub fn get_percentile_at_or_below_value(&self, value: f64) -> f64 {
-        self.histogram.get_percentile_at_or_below_value(value)
+        let integer_value = to_integer_value_clamped_for_histogram(self, value);
+        get_percentile_at_or_below_value_for_histogram(self, integer_value)
     }
 
     pub fn size_of_equivalent_value_range(&self, value: f64) -> f64 {
-        self.histogram.size_of_equivalent_value_range(value)
+        self.settings()
+            .size_of_equivalent_value_range(to_integer_value_clamped_for_histogram(self, value)) as f64
+            * self.integer_to_double_value_conversion_ratio()
     }
 
     pub fn lowest_equivalent_value(&self, value: f64) -> f64 {
-        self.histogram.lowest_equivalent_value(value)
+        lowest_equivalent_value_for_histogram(self, value)
     }
 
     pub fn highest_equivalent_value(&self, value: f64) -> f64 {
-        self.histogram.highest_equivalent_value(value)
+        highest_equivalent_value_for_histogram(self, value)
     }
 
     pub fn median_equivalent_value(&self, value: f64) -> f64 {
-        self.histogram.median_equivalent_value(value)
+        self.settings()
+            .median_equivalent_value(to_integer_value_clamped_for_histogram(self, value)) as f64
+            * self.integer_to_double_value_conversion_ratio()
     }
 
     pub fn values_are_equivalent(&self, value1: f64, value2: f64) -> bool {
-        self.histogram.values_are_equivalent(value1, value2)
+        self.lowest_equivalent_value(value1) == self.lowest_equivalent_value(value2)
     }
 
     pub fn get_current_lowest_trackable_non_zero_value(&self) -> f64 {
-        self.histogram.get_current_lowest_trackable_non_zero_value()
+        self.current_lowest_value_in_auto_range
     }
 
     pub fn get_current_highest_trackable_value(&self) -> f64 {
-        self.histogram.get_current_highest_trackable_value()
+        self.current_highest_value_limit_in_auto_range
     }
 
     pub fn get_highest_to_lowest_value_ratio(&self) -> u64 {
-        self.histogram.get_highest_to_lowest_value_ratio()
+        self.configured_highest_to_lowest_value_ratio
     }
 
     pub fn get_number_of_significant_value_digits(&self) -> u8 {
-        self.histogram.get_number_of_significant_value_digits()
+        self.settings().number_of_significant_value_digits as u8
     }
 
     pub fn is_auto_resize(&self) -> bool {
-        self.histogram.is_auto_resize()
+        self.auto_resize
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram.percentiles_snapshot(percentile_ticks_per_half_distance)
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Self> {
+        DoublePercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram.linear_bucket_values_snapshot(value_units_per_bucket)
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Self> {
+        DoubleLinearIterator::new(self, value_units_per_bucket)
     }
 
-    pub fn logarithmic_bucket_values(
-        &self,
-        value_units_in_first_bucket: f64,
-        log_base: f64,
-    ) -> DoubleLogarithmicIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram
-            .logarithmic_bucket_values_snapshot(value_units_in_first_bucket, log_base)
+    pub fn logarithmic_bucket_values(&self, value_units_in_first_bucket: f64, log_base: f64) -> DoubleLogarithmicIterator<&'_ Self> {
+        DoubleLogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
     }
 
-    pub fn all_values(&self) -> DoubleAllValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram.all_values_snapshot()
+    pub fn all_values(&self) -> DoubleAllValuesIterator<&'_ Self> {
+        DoubleAllValuesIterator::new(self)
     }
 
-    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.histogram.recorded_values_snapshot()
+    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<&'_ Self> {
+        DoubleRecordedValuesIterator::new(self)
     }
 }
+
+impl<P: OverflowPolicy> crate::core::readable_histogram::sealed::Sealed for ConcurrentDoubleSnapshot<'_, P> {}
+
+impl<P: OverflowPolicy> ReadableHistogram for ConcurrentDoubleSnapshot<'_, P> {
+    fn settings(&self) -> HistogramSettings {
+        let mut settings = self.integer_view.settings();
+        settings.auto_resize = self.auto_resize;
+        settings
+    }
+
+    fn array_length(&self) -> u32 {
+        self.integer_view.array_length()
+    }
+
+    fn get_total_count(&self) -> u64 {
+        self.integer_view.get_total_count()
+    }
+
+    fn unsafe_get_count_at_index(&self, idx: u32) -> u64 {
+        self.integer_view.unsafe_get_count_at_index(idx)
+    }
+
+    fn get_max_value(&self) -> u64 {
+        self.integer_view.get_max_value()
+    }
+
+    fn meta_data(&self) -> &HistogramMetaData {
+        self.integer_view.meta_data()
+    }
+
+    fn integer_to_double_value_conversion_ratio(&self) -> f64 {
+        self.integer_view.integer_to_double_value_conversion_ratio()
+    }
+
+    fn normalizing_index_offset(&self) -> i32 {
+        self.integer_view.normalizing_index_offset()
+    }
+}
+
+impl<P: OverflowPolicy> IterableHistogram for ConcurrentDoubleSnapshot<'_, P> {}
+impl<P: OverflowPolicy> EncodableHistogram for ConcurrentDoubleSnapshot<'_, P> {}
 
 impl crate::core::readable_histogram::sealed::Sealed for ConcurrentDoubleReadView<'_> {}
 
@@ -457,12 +545,27 @@ impl ReadableHistogram for ConcurrentDoubleReadView<'_> {
 
 impl EncodableHistogram for ConcurrentDoubleReadView<'_> {}
 
-impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
+impl<P: OverflowPolicy> Default for ConcurrentDoubleHistogramWithPolicy<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: OverflowPolicy> ConcurrentDoubleHistogramWithPolicy<P> {
+    /// Construct a concurrent histogram with the built-in default settings.
+    ///
+    /// Use [`builder`](Self::builder) when the dynamic range, precision, or
+    /// auto-resize behavior needs to be customized.
+    pub fn new() -> Self {
+        Self::with_significant_digits(DEFAULT_SIGNIFICANT_VALUE_DIGITS)
+            .expect("built-in concurrent double histogram defaults must be valid")
+    }
+
     pub fn builder() -> ConcurrentDoubleHistogramBuilder<P> {
         ConcurrentDoubleHistogramBuilder::new()
     }
 
-    pub(crate) fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
+    pub(crate) fn with_significant_digits(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
         let histogram = Self::with_highest_to_lowest_value_ratio(2, number_of_significant_value_digits)?;
         histogram.set_auto_resize(true);
         Ok(histogram)
@@ -491,7 +594,7 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
             ResizableConcurrentHistogram::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
                 .map_err(DoubleCreationError::Internal)?;
 
-        let histogram = ConcurrentDoubleHistogram {
+        let histogram = ConcurrentDoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: AtomicU64::new(highest_to_lowest_value_ratio),
             current_lowest_value_in_auto_range: AtomicU64::new(0.0_f64.to_bits()),
@@ -515,6 +618,11 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
         self.record_count_at_value(count, value)
     }
 
+    /// Record the measurement, then synthetic samples for coordinated omission.
+    /// Non-positive intervals disable correction. NaN, positive infinity, or a
+    /// subtraction that cannot make progress returns
+    /// [`RecordError::InvalidExpectedInterval`], retaining the actual measurement
+    /// and any synthetic samples already recorded.
     pub fn record_value_with_expected_interval(&self, value: f64, expected_interval_between_value_samples: f64) -> Result<(), RecordError> {
         self.record_value_with_count_and_expected_interval(value, 1, expected_interval_between_value_samples)
     }
@@ -735,15 +843,9 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
         expected_interval_between_value_samples: f64,
     ) -> Result<(), RecordError> {
         self.record_count_at_value(count, value)?;
-        if expected_interval_between_value_samples <= 0.0 {
-            return Ok(());
-        }
-        let mut missing_value = value - expected_interval_between_value_samples;
-        while missing_value >= expected_interval_between_value_samples {
-            self.record_count_at_value(count, missing_value)?;
-            missing_value -= expected_interval_between_value_samples;
-        }
-        Ok(())
+        crate::core::coordinated_omission::record_missing_double_values(value, expected_interval_between_value_samples, |missing| {
+            self.record_count_at_value(count, missing)
+        })
     }
 
     #[inline(always)]
@@ -1110,33 +1212,6 @@ impl<P: OverflowPolicy> ConcurrentDoubleHistogram<P> {
             )?;
         }
         Ok(())
-    }
-
-    pub(crate) fn percentiles_snapshot(
-        &self,
-        percentile_ticks_per_half_distance: u32,
-    ) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
-        DoublePercentileIterator::from_readable(self.read_view(), percentile_ticks_per_half_distance)
-    }
-
-    pub(crate) fn linear_bucket_values_snapshot(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleReadView<'_>> {
-        DoubleLinearIterator::from_readable(self.read_view(), value_units_per_bucket)
-    }
-
-    pub(crate) fn logarithmic_bucket_values_snapshot(
-        &self,
-        value_units_in_first_bucket: f64,
-        log_base: f64,
-    ) -> DoubleLogarithmicIterator<ConcurrentDoubleReadView<'_>> {
-        DoubleLogarithmicIterator::from_readable(self.read_view(), value_units_in_first_bucket, log_base)
-    }
-
-    pub(crate) fn all_values_snapshot(&self) -> DoubleAllValuesIterator<ConcurrentDoubleReadView<'_>> {
-        DoubleAllValuesIterator::from_readable(self.read_view())
-    }
-
-    pub(crate) fn recorded_values_snapshot(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleReadView<'_>> {
-        DoubleRecordedValuesIterator::from_readable(self.read_view())
     }
 }
 

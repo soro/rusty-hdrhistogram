@@ -1,37 +1,42 @@
 use crate::core::HistogramStorageMetadata;
 
+/// Owned counts with no spare capacity or separately cached length. The header
+/// lives in the histogram; growing replaces only the counts allocation.
 pub struct BackingArray<T> {
-    data: Vec<T>,
-    metadata: HistogramStorageMetadata,
+    data: Box<[T]>,
+    bucket_count: u32,
+    highest_trackable_value: u64,
 }
 
 impl<T: Default + Copy> BackingArray<T> {
     #[inline]
     pub fn new(metadata: HistogramStorageMetadata) -> BackingArray<T> {
         BackingArray {
-            data: vec![T::default(); metadata.counts_array_length as usize],
-            metadata,
+            data: vec![T::default(); metadata.counts_array_length as usize].into_boxed_slice(),
+            bucket_count: metadata.bucket_count,
+            highest_trackable_value: metadata.highest_trackable_value,
         }
     }
 
     pub fn empty() -> BackingArray<T> {
         BackingArray {
-            data: Vec::new(),
-            metadata: HistogramStorageMetadata {
-                bucket_count: 0,
-                counts_array_length: 0,
-                highest_trackable_value: 0,
-            },
+            data: Box::default(),
+            bucket_count: 0,
+            highest_trackable_value: 0,
         }
     }
 
     #[inline]
     pub fn grow(&mut self, metadata: HistogramStorageMetadata) {
         let new_length = metadata.counts_array_length as usize;
+        assert!(new_length >= self.data.len(), "backing array cannot shrink");
         if new_length > self.data.len() {
-            self.data.resize(new_length, T::default());
+            let mut data = vec![T::default(); new_length].into_boxed_slice();
+            data[..self.data.len()].copy_from_slice(&self.data);
+            self.data = data;
         }
-        self.metadata = metadata;
+        self.bucket_count = metadata.bucket_count;
+        self.highest_trackable_value = metadata.highest_trackable_value;
     }
 
     #[inline(always)]
@@ -56,12 +61,16 @@ impl<T: Default + Copy> BackingArray<T> {
 
     #[inline(always)]
     pub fn length(&self) -> u32 {
-        self.metadata.counts_array_length
+        self.data.len() as u32
     }
 
     #[inline(always)]
     pub fn metadata(&self) -> HistogramStorageMetadata {
-        self.metadata
+        HistogramStorageMetadata {
+            bucket_count: self.bucket_count,
+            counts_array_length: self.length(),
+            highest_trackable_value: self.highest_trackable_value,
+        }
     }
 
     #[inline(always)]
@@ -85,5 +94,52 @@ impl<T: Default + Copy> BackingArray<T> {
             return Some(&mut self.data[..length]);
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(length: u32) -> HistogramStorageMetadata {
+        HistogramStorageMetadata {
+            counts_array_length: length,
+            bucket_count: length,
+            highest_trackable_value: u64::from(length) * 1_024,
+        }
+    }
+
+    #[test]
+    fn owned_slice_grows_preserving_counts_and_deriving_metadata_length() {
+        let mut counts = BackingArray::<u64>::empty();
+        assert_eq!(counts.length(), 0);
+        assert_eq!(counts.metadata(), metadata(0));
+        counts.grow(metadata(3));
+        *counts.get_unchecked_mut(0) = 4;
+        *counts.get_unchecked_mut(2) = 9;
+        counts.grow(metadata(7));
+        assert_eq!(counts.length(), 7);
+        assert_eq!(counts.metadata(), metadata(7));
+        assert_eq!(counts.get_slice(7).unwrap(), &[4, 0, 9, 0, 0, 0, 0]);
+        assert!(counts.get_slice(8).is_none());
+        assert!(counts.get(7).is_none());
+        counts.clear();
+        assert_eq!(counts.get_slice(7).unwrap(), &[0; 7]);
+        assert_eq!(counts.metadata(), metadata(7));
+    }
+
+    #[test]
+    fn unchanged_slice_length_updates_metadata_without_reallocation() {
+        let mut counts = BackingArray::<u16>::new(metadata(3));
+        *counts.get_unchecked_mut(1) = 12;
+        let original_ptr = counts.data.as_ptr();
+        let updated = HistogramStorageMetadata {
+            highest_trackable_value: 4_000,
+            ..metadata(3)
+        };
+        counts.grow(updated);
+        assert_eq!(counts.data.as_ptr(), original_ptr);
+        assert_eq!(counts.metadata(), updated);
+        assert_eq!(counts.get_slice(3).unwrap(), &[0, 12, 0]);
     }
 }

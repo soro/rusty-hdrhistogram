@@ -380,6 +380,28 @@ fn reset_restores_empty_tracking_values_for_coarse_layouts() {
 }
 
 #[test]
+fn static_failed_subtraction_repairs_tracking_after_partial_mutation() {
+    let mut histogram = TestStaticHistogram::new();
+    let mut other = TestStaticHistogram::new();
+    histogram.record_value(1).unwrap();
+    histogram.record_value(2).unwrap();
+    other.record_value(1).unwrap();
+    other.record_value_with_count(2, 2).unwrap();
+
+    assert!(matches!(histogram.subtract(&other), Err(SubtractionError::CountExceededAtValue)));
+    assert_eq!(Some(0), histogram.get_count_at_value(1));
+    assert_eq!(Some(1), histogram.get_count_at_value(2));
+    assert_eq!(1, histogram.get_total_count());
+    assert_eq!(2, histogram.get_min_non_zero_value());
+    assert_eq!(2, histogram.get_max_value());
+    assert_eq!(2.0, histogram.get_mean());
+
+    histogram.record_value(3).unwrap();
+    assert_eq!(2, histogram.get_total_count());
+    assert_eq!(3, histogram.get_max_value());
+}
+
+#[test]
 fn static_histogram_subtract_to_negative_counts_throws() {
     let mut left = TestStaticHistogram::new();
     let mut right = TestStaticHistogram::new();
@@ -1071,6 +1093,49 @@ fn subtract_to_zero_counts() {
     assert_eq!(Some(0), histogram.get_count_at_value(TEST_VALUE_LEVEL * 1000));
     assert_eq!(0, histogram.get_total_count());
     verify_max_value(histogram);
+}
+
+#[test]
+fn failed_subtraction_repairs_tracking_after_partial_mutation() {
+    let mut histogram = Histogram::new(2).unwrap();
+    let mut other = Histogram::new(2).unwrap();
+    histogram.record_value(1).unwrap();
+    histogram.record_value(2).unwrap();
+    other.record_value(1).unwrap();
+    other.record_value_with_count(2, 2).unwrap();
+
+    assert!(matches!(histogram.subtract(&other), Err(SubtractionError::CountExceededAtValue)));
+    assert_eq!(Some(0), histogram.get_count_at_value(1));
+    assert_eq!(Some(1), histogram.get_count_at_value(2));
+    assert_eq!(1, histogram.get_total_count());
+    assert_eq!(2, histogram.get_min_non_zero_value());
+    assert_eq!(2, histogram.get_max_value());
+    assert_eq!(2.0, histogram.get_mean());
+
+    let encoded = crate::encoding::encode_histogram_v2(&histogram).unwrap();
+    let decoded = crate::encoding::decode_histogram_v2(&encoded).unwrap();
+    assert!(histogram.equals(&decoded));
+    histogram.record_value(3).unwrap();
+    assert_eq!(2, histogram.get_total_count());
+    assert_eq!(3, histogram.get_max_value());
+}
+
+#[test]
+fn failed_subtraction_with_coarser_destination_repairs_empty_tracking() {
+    let mut histogram = Histogram::with_low_high_sigvdig(1_024, 1_000_000, 2).unwrap();
+    let mut other = Histogram::with_high_sigvdig(1_000_000, 3).unwrap();
+    histogram.record_value(2_048).unwrap();
+    other.record_value(2_048).unwrap();
+    other.record_value(2_050).unwrap();
+
+    // Both source buckets map to the same destination bucket. The first
+    // subtraction succeeds and the second fails after emptying the destination.
+    assert!(matches!(histogram.subtract(&other), Err(SubtractionError::CountExceededAtValue)));
+    assert_eq!(Some(0), histogram.get_count_at_value(2_048));
+    assert_eq!(0, histogram.get_total_count());
+    assert_eq!(ORIGINAL_MIN, histogram.get_min_non_zero_value());
+    assert_eq!(0, histogram.get_max_value());
+    assert_eq!(0.0, histogram.get_mean());
 }
 
 #[test]

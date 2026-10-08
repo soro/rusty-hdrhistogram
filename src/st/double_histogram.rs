@@ -70,7 +70,7 @@ fn derive_integer_value_range(external_ratio: u64, significant_value_digits: u8)
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
-pub struct DoubleHistogram<P: OverflowPolicy = ThrowOnOverflow> {
+pub struct DoubleHistogramWithPolicy<P: OverflowPolicy> {
     integer_histogram: Histogram,
     configured_highest_to_lowest_value_ratio: u64,
     current_lowest_value_in_auto_range: f64,
@@ -120,8 +120,8 @@ impl<P: OverflowPolicy> DoubleHistogramBuilder<P> {
         self
     }
 
-    pub fn build(self) -> Result<DoubleHistogram<P>, DoubleCreationError> {
-        let mut histogram = DoubleHistogram::<P>::with_highest_to_lowest_value_ratio(
+    pub fn build(self) -> Result<DoubleHistogramWithPolicy<P>, DoubleCreationError> {
+        let mut histogram = DoubleHistogramWithPolicy::<P>::with_highest_to_lowest_value_ratio(
             self.highest_to_lowest_value_ratio,
             self.number_of_significant_value_digits,
         )?;
@@ -130,14 +130,29 @@ impl<P: OverflowPolicy> DoubleHistogramBuilder<P> {
     }
 }
 
-pub type SaturatingDoubleHistogram = DoubleHistogram<SaturateOnOverflow>;
+pub type DoubleHistogram = DoubleHistogramWithPolicy<ThrowOnOverflow>;
+pub type SaturatingDoubleHistogram = DoubleHistogramWithPolicy<SaturateOnOverflow>;
 
-impl<P: OverflowPolicy> DoubleHistogram<P> {
+impl<P: OverflowPolicy> Default for DoubleHistogramWithPolicy<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: OverflowPolicy> DoubleHistogramWithPolicy<P> {
+    /// Construct a histogram with the built-in default settings.
+    ///
+    /// Use [`builder`](Self::builder) when the dynamic range, precision, or
+    /// auto-resize behavior needs to be customized.
+    pub fn new() -> Self {
+        Self::with_significant_digits(DEFAULT_SIGNIFICANT_VALUE_DIGITS).expect("built-in double histogram defaults must be valid")
+    }
+
     pub fn builder() -> DoubleHistogramBuilder<P> {
         DoubleHistogramBuilder::new()
     }
 
-    pub(crate) fn new(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
+    pub(crate) fn with_significant_digits(number_of_significant_value_digits: u8) -> Result<Self, DoubleCreationError> {
         let mut histogram = Self::with_highest_to_lowest_value_ratio(2, number_of_significant_value_digits)?;
         histogram.set_auto_resize(true);
         Ok(histogram)
@@ -164,7 +179,7 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
         let highest_trackable_value = integer_value_range - 1;
         let integer_histogram = Histogram::with_low_high_sigvdig(1, highest_trackable_value, number_of_significant_value_digits)
             .map_err(DoubleCreationError::Internal)?;
-        let mut histogram = DoubleHistogram {
+        let mut histogram = DoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
             current_lowest_value_in_auto_range: 0.0,
@@ -187,7 +202,7 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
         let mut integer_histogram = self.integer_histogram.empty_like_for_recorder();
         integer_histogram.reset();
 
-        let mut histogram = DoubleHistogram {
+        let mut histogram = DoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: self.configured_highest_to_lowest_value_ratio,
             current_lowest_value_in_auto_range: 0.0,
@@ -211,13 +226,15 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
         if number_of_significant_value_digits > 5 {
             return Err(DoubleCreationError::SignificantValueDigitsExceedsMax);
         }
-        let sig_digits_factor = 10_u128.pow(number_of_significant_value_digits as u32);
-        let ratio_check = (highest_to_lowest_value_ratio as u128) * sig_digits_factor;
-        if ratio_check >= (1_u128 << 61) {
-            return Err(DoubleCreationError::HighestToLowestValueRatioTooLarge);
-        }
-
-        let integer_value_range = derive_integer_value_range(highest_to_lowest_value_ratio, number_of_significant_value_digits)
+        // Auto-growth can produce a valid layout beyond Java's conservative
+        // constructor ratio check. Decode against the actual integer capacity,
+        // without changing either construction or recording limits.
+        let internal_ratio = 1_u64
+            .checked_shl(find_containing_binary_order_of_magnitude_long(highest_to_lowest_value_ratio) + 1)
+            .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
+        let integer_value_range = sub_bucket_half_count_for_sig_digits(number_of_significant_value_digits)
+            .checked_mul(internal_ratio)
+            .filter(|&range| range <= (1_u64 << 63))
             .ok_or(DoubleCreationError::HighestToLowestValueRatioTooLarge)?;
         if integer_histogram.get_lowest_discernible_value() != 1
             || integer_histogram.get_highest_trackable_value() != integer_value_range - 1
@@ -231,9 +248,7 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
             return Err(DoubleCreationError::InternalHistogramMismatch);
         }
         let current_lowest_value_in_auto_range = integer_to_double_ratio * integer_histogram.lowest_tracking_integer_value() as f64;
-        let internal_ratio = derive_internal_highest_to_lowest_value_ratio(highest_to_lowest_value_ratio);
-
-        Ok(DoubleHistogram {
+        Ok(DoubleHistogramWithPolicy {
             integer_histogram,
             configured_highest_to_lowest_value_ratio: highest_to_lowest_value_ratio,
             current_lowest_value_in_auto_range,
@@ -252,6 +267,11 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
         self.record_count_at_value(count, value)
     }
 
+    /// Record the measurement, then synthetic samples for coordinated omission.
+    /// Non-positive intervals disable correction. NaN, positive infinity, or a
+    /// subtraction that cannot make progress returns
+    /// [`RecordError::InvalidExpectedInterval`], retaining the actual measurement
+    /// and any synthetic samples already recorded.
     pub fn record_value_with_expected_interval(
         &mut self,
         value: f64,
@@ -479,15 +499,9 @@ impl<P: OverflowPolicy> DoubleHistogram<P> {
         expected_interval_between_value_samples: f64,
     ) -> Result<(), RecordError> {
         self.record_count_at_value(count, value)?;
-        if expected_interval_between_value_samples <= 0.0 {
-            return Ok(());
-        }
-        let mut missing_value = value - expected_interval_between_value_samples;
-        while missing_value >= expected_interval_between_value_samples {
-            self.record_count_at_value(count, missing_value)?;
-            missing_value -= expected_interval_between_value_samples;
-        }
-        Ok(())
+        crate::core::coordinated_omission::record_missing_double_values(value, expected_interval_between_value_samples, |missing| {
+            self.record_count_at_value(count, missing)
+        })
     }
 
     #[inline(always)]

@@ -23,6 +23,10 @@ pub enum RecordError {
     ResizeFailed(CreationError),
     DoubleCreationFailed(DoubleCreationError),
     ConcurrentModification,
+    /// Double coordinated-omission correction has a NaN/positive-infinite
+    /// interval or cannot produce a strictly smaller synthetic value. The
+    /// actual sample and any earlier synthetic samples remain recorded.
+    InvalidExpectedInterval,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +88,7 @@ impl fmt::Display for RecordError {
             RecordError::ResizeFailed(err) => write!(f, "failed to resize histogram while recording: {}", err),
             RecordError::DoubleCreationFailed(err) => write!(f, "failed to create internal double histogram while recording: {}", err),
             RecordError::ConcurrentModification => write!(f, "source histogram was modified concurrently while recording"),
+            RecordError::InvalidExpectedInterval => write!(f, "coordinated-omission interval must be finite and make forward progress"),
         }
     }
 }
@@ -93,7 +98,7 @@ impl Error for RecordError {
         match self {
             RecordError::ResizeFailed(err) => Some(err),
             RecordError::DoubleCreationFailed(err) => Some(err),
-            RecordError::ValueOutOfRangeResizeDisabled | RecordError::ConcurrentModification => None,
+            RecordError::ValueOutOfRangeResizeDisabled | RecordError::ConcurrentModification | RecordError::InvalidExpectedInterval => None,
         }
     }
 }

@@ -129,6 +129,160 @@ fn filter_command_scans_without_decoding_payloads() {
 }
 
 #[test]
+fn file_commands_reject_input_as_output_without_truncating_it() {
+    let log = sample_log();
+    for command in ["filter", "process"] {
+        let input = write_temp_input("same-input-output", &log);
+        let output = run_with_stdin(
+            &[
+                "log",
+                command,
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                input.to_str().unwrap(),
+            ],
+            "",
+        );
+        assert_eq!(Some(1), output.status.code());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("refers to the input file"));
+        assert_eq!(log, fs::read_to_string(&input).unwrap());
+        assert!(!suffixed_path(&input, "hgrm").exists());
+        fs::remove_file(input).unwrap();
+    }
+}
+
+#[test]
+fn process_checks_all_report_paths_before_creating_any_output() {
+    let log = sample_log();
+    for suffix in ["hgrm", "mwp"] {
+        let prefix = temp_output_prefix("derived-output-alias");
+        let input = suffixed_path(&prefix, suffix);
+        fs::write(&input, &log).unwrap();
+        let output = run_with_stdin(
+            &[
+                "log",
+                "process",
+                "--input",
+                input.to_str().unwrap(),
+                "--output",
+                prefix.to_str().unwrap(),
+                "--moving-window-percentile",
+                "90",
+            ],
+            "",
+        );
+        assert_eq!(Some(1), output.status.code());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("refers to the input file"));
+        assert_eq!(log, fs::read_to_string(&input).unwrap());
+        assert!(!prefix.exists());
+        let other_suffix = if suffix == "hgrm" { "mwp" } else { "hgrm" };
+        assert!(!suffixed_path(&prefix, other_suffix).exists());
+        fs::remove_file(input).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn file_commands_reject_symlink_and_hard_link_input_aliases() {
+    let log = sample_log();
+    for command in ["filter", "process"] {
+        for hard_link in [false, true] {
+            let input = write_temp_input("linked-input", &log);
+            let alias = temp_output_prefix("linked-output");
+            if hard_link {
+                fs::hard_link(&input, &alias).unwrap();
+            } else {
+                std::os::unix::fs::symlink(input.file_name().unwrap(), &alias).unwrap();
+            }
+            let output = run_with_stdin(
+                &[
+                    "log",
+                    command,
+                    "--input",
+                    input.to_str().unwrap(),
+                    "--output",
+                    alias.to_str().unwrap(),
+                ],
+                "",
+            );
+            assert_eq!(Some(1), output.status.code());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("refers to the input file"));
+            assert_eq!(log, fs::read_to_string(&input).unwrap());
+            assert_eq!(log, fs::read_to_string(&alias).unwrap());
+            assert!(!suffixed_path(&alias, "hgrm").exists());
+            fs::remove_file(alias).unwrap();
+            fs::remove_file(input).unwrap();
+        }
+    }
+}
+
+#[test]
+fn filter_rejects_output_aliasing_redirected_file_input() {
+    let log = sample_log();
+    let input = write_temp_input("redirected-input", &log);
+    let output = Command::new(env!("CARGO_BIN_EXE_hdrhistogram"))
+        .args(["log", "filter", "--output", input.to_str().unwrap()])
+        .stdin(fs::File::open(&input).unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(Some(1), output.status.code());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refers to the input file"));
+    assert_eq!(log, fs::read_to_string(&input).unwrap());
+    fs::remove_file(input).unwrap();
+}
+
+#[test]
+fn process_rejects_report_outputs_that_alias_each_other() {
+    let prefix = write_temp_input("aliased-reports", "existing report");
+    let percentile_output = suffixed_path(&prefix, "hgrm");
+    fs::hard_link(&prefix, &percentile_output).unwrap();
+    let output = run_with_stdin(&["log", "process", "--output", prefix.to_str().unwrap()], &sample_log());
+    assert_eq!(Some(1), output.status.code());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refer to the same file"));
+    assert_eq!("existing report", fs::read_to_string(&prefix).unwrap());
+    fs::remove_file(percentile_output).unwrap();
+    fs::remove_file(prefix).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_commands_report_buffer_flush_failures() {
+    let input = write_temp_input("flush-failure-input", &sample_log());
+    for (command, moving_window) in [("filter", false), ("process", false), ("process", true)] {
+        let prefix = temp_output_prefix("flush-failure-output");
+        // Limit only the child process: file creation succeeds, but draining
+        // these small buffered reports to disk fails with EFBIG during flush.
+        let mut child = Command::new("sh");
+        child.args(["-c", "ulimit -f 0; trap '' XFSZ; exec \"$@\"", "flush-test"]);
+        child.arg(env!("CARGO_BIN_EXE_hdrhistogram"));
+        child.args([
+            "log",
+            command,
+            "--input",
+            input.to_str().unwrap(),
+            "--output",
+            prefix.to_str().unwrap(),
+        ]);
+        if moving_window {
+            child.args(["--moving-window-percentile", "90"]);
+        }
+        let output = child.output().unwrap();
+        assert_eq!(Some(1), output.status.code(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("File too large"));
+        assert_eq!(0, fs::metadata(&prefix).unwrap().len());
+        fs::remove_file(prefix.clone()).unwrap();
+        if command == "process" {
+            fs::remove_file(suffixed_path(&prefix, "hgrm")).unwrap();
+        }
+        if moving_window {
+            fs::remove_file(suffixed_path(&prefix, "mwp")).unwrap();
+        }
+    }
+    fs::remove_file(input).unwrap();
+}
+
+#[test]
 fn process_command_writes_percentile_distribution_to_stdout() {
     let log = sample_log();
 

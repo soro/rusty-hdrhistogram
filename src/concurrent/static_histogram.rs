@@ -1,13 +1,13 @@
 use crate::concurrent::concurrent_util;
-use crate::concurrent::inline_backing_array::InlineBackingArray;
+use crate::concurrent::inline_backing_array::{AtomicInlineBackingArray, InlineBackingArray};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
 use crate::concurrent::snapshot::{FixedSnapshot, Snapshot};
 use crate::core::constants::*;
 use crate::core::*;
 use crate::iteration::RecordedValuesIterator;
 use std::ptr;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicPtr, AtomicU64};
 
 #[repr(C)]
 pub struct FixedConcurrentHistogram {
@@ -16,7 +16,7 @@ pub struct FixedConcurrentHistogram {
     raw_max_value: AtomicU64,
     raw_min_non_zero_value: AtomicU64,
     total_count: AtomicU64,
-    pub(in crate::concurrent) counts: AtomicPtr<InlineBackingArray<AtomicU64>>,
+    pub(in crate::concurrent) counts: AtomicInlineBackingArray<AtomicU64>,
 }
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
@@ -71,10 +71,8 @@ impl FixedConcurrentHistogramBuilder {
 
 impl Drop for FixedConcurrentHistogram {
     fn drop(&mut self) {
-        let counts = *self.counts.get_mut();
-        debug_assert!(!counts.is_null());
-        if !counts.is_null() {
-            unsafe { (*counts).dealloc() };
+        unsafe {
+            InlineBackingArray::dealloc(self.counts.load(Ordering::Relaxed));
         }
     }
 }
@@ -102,7 +100,7 @@ impl FixedConcurrentHistogram {
                 raw_max_value: AtomicU64::new(ORIGINAL_MAX),
                 raw_min_non_zero_value: AtomicU64::new(ORIGINAL_MIN),
                 total_count: AtomicU64::new(0),
-                counts: AtomicPtr::new(array_ptr),
+                counts: AtomicInlineBackingArray::new(array_ptr),
             })
         }
     }
@@ -324,7 +322,7 @@ impl FixedConcurrentHistogram {
     }
 
     pub(crate) fn clear_counts_for_reuse(&mut self) {
-        let counts = *self.counts.get_mut();
+        let counts = unsafe { self.counts.load(Ordering::Relaxed) };
         let counts_len = unsafe { (*counts).length() };
         for i in 0..counts_len {
             unsafe { (*counts).get_unchecked(i) }.store(0, Ordering::Relaxed);

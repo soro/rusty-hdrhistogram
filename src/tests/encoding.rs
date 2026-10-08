@@ -1,6 +1,5 @@
 use crate::concurrent::{DoubleRecorder, ResizableConcurrentHistogram};
 use crate::core::histogram_settings::{HistogramSettings, V2_ENCODING_HEADER_SIZE, V2_ENCODING_MAX_WORD_SIZE_IN_BYTES};
-use crate::core::ThrowOnOverflow;
 use crate::encoding::*;
 use crate::st::{DoubleHistogram, Histogram};
 #[cfg(feature = "encoding-compression")]
@@ -79,16 +78,74 @@ fn static_histogram_v2_roundtrip_preserves_counts() {
 }
 
 #[test]
-fn histogram_v2_decode_canonicalizes_normalizing_index_offset() {
+fn histogram_v2_decode_canonicalizes_aligned_normalizing_index_offsets() {
     let mut histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let mut encoded = encode_histogram_v2(&histogram).unwrap();
-    encoded[8..12].copy_from_slice(&i32::MAX.to_be_bytes());
+    let half_bucket = histogram.settings().sub_bucket_half_count as i32;
+    for offset in [0, half_bucket, -half_bucket, i32::MAX / half_bucket * half_bucket, i32::MIN] {
+        encoded[8..12].copy_from_slice(&offset.to_be_bytes());
 
-    let decoded = decode_histogram_v2(&encoded).unwrap();
-    assert_eq!(3, decoded.get_total_count());
-    assert_eq!(Some(3), decoded.get_count_at_value(100));
+        let mut decoded = decode_histogram_v2(&encoded).unwrap();
+        assert_eq!(3, decoded.get_total_count());
+        assert_eq!(Some(3), decoded.get_count_at_value(100));
+        // Exercise the low-half-bucket path that relies on decoded alignment.
+        decoded.shift_values_left(1).unwrap();
+        assert_eq!(3, decoded.get_total_count());
+        assert_eq!(Some(3), decoded.get_count_at_value(200));
+    }
+}
+
+#[test]
+fn histogram_v2_decode_rejects_misaligned_normalizing_index_offsets() {
+    let histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
+    let mut encoded = encode_histogram_v2(&histogram).unwrap();
+    for offset in [1_i32, -1, i32::MAX, i32::MIN + 1] {
+        encoded[8..12].copy_from_slice(&offset.to_be_bytes());
+        assert!(matches!(decode_histogram_v2(&encoded), Err(DecodeError::InvalidPayload)));
+    }
+}
+
+#[test]
+fn histogram_v1_decode_checks_normalizing_index_offset_alignment() {
+    let histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
+    let mut encoded = encode_histogram_v2(&histogram).unwrap();
+    encoded.truncate(V2_ENCODING_HEADER_SIZE);
+    encoded[..4].copy_from_slice(&(0x1c849301_u32 | 0x80).to_be_bytes()); // V1, eight-byte counts.
+    encoded[4..8].copy_from_slice(&16_i32.to_be_bytes());
+    encoded.extend_from_slice(&0_i64.to_be_bytes());
+    encoded.extend_from_slice(&3_i64.to_be_bytes());
+    assert_eq!(Some(3), decode_histogram(&encoded).unwrap().get_count_at_value(1));
+
+    encoded[8..12].copy_from_slice(&1_i32.to_be_bytes());
+    assert!(matches!(decode_histogram(&encoded), Err(DecodeError::InvalidPayload)));
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
+fn compressed_histogram_decode_checks_normalizing_index_offset_alignment() {
+    let histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
+    let mut raw = encode_histogram_v2(&histogram).unwrap();
+    raw[8..12].copy_from_slice(&1_i32.to_be_bytes());
+    let encoded = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &zlib_compress(&raw));
+    assert!(matches!(decode_histogram_compressed(&encoded), Err(DecodeError::InvalidPayload)));
+}
+
+#[test]
+fn double_histogram_decode_rejects_offset_that_would_break_range_shifts() {
+    let mut integer = Histogram::with_high_sigvdig(8_191, 3).unwrap();
+    integer.record_value(1).unwrap();
+    let mut inner = encode_histogram_v2(&integer).unwrap();
+    inner[8..12].copy_from_slice(&1_i32.to_be_bytes());
+    let mut encoded = DOUBLE_HISTOGRAM_ENCODING_COOKIE.to_be_bytes().to_vec();
+    encoded.extend_from_slice(&3_i32.to_be_bytes());
+    encoded.extend_from_slice(&2_i64.to_be_bytes());
+    encoded.extend_from_slice(&inner);
+
+    // Accepting this offset used to allow record_value(512.0) on the decoded
+    // double histogram to read past the count allocation while shifting it.
+    assert!(matches!(decode_double_histogram_v2(&encoded), Err(DecodeError::InvalidPayload)));
 }
 
 #[test]
@@ -117,7 +174,7 @@ fn concurrent_histogram_v2_encoding_uses_read_view() {
 
 #[test]
 fn double_histogram_v2_roundtrip_preserves_counts() {
-    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
+    let mut histogram = DoubleHistogram::with_significant_digits(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
     histogram.record_value_with_count(128.0, 3).unwrap();
@@ -135,7 +192,7 @@ fn double_histogram_v2_roundtrip_preserves_counts() {
 
 #[test]
 fn concurrent_double_snapshot_v2_roundtrip_preserves_counts() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -178,17 +235,181 @@ fn compressed_histogram_roundtrip_preserves_counts() {
 
 #[cfg(feature = "encoding-compression")]
 #[test]
-fn compressed_histogram_decode_ignores_trailing_inflated_bytes_without_materializing_them() {
+fn compressed_histogram_decode_rejects_trailing_inflated_bytes() {
     let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
     histogram.record_value_with_count(100, 3).unwrap();
 
     let mut raw = encode_histogram_v2(&histogram).unwrap();
-    raw.extend(std::iter::repeat(0_u8).take(1024 * 1024));
+    raw.resize(raw.len() + 1024 * 1024, 0);
     let compressed = zlib_compress(&raw);
     let encoded = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &compressed);
 
-    let decoded = decode_histogram_compressed(&encoded).unwrap();
-    assert_eq!(Some(3), decoded.get_count_at_value(100));
+    assert!(matches!(decode_histogram_compressed(&encoded), Err(DecodeError::InvalidPayload)));
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
+fn compressed_histogram_requires_complete_checked_zlib_stream() {
+    let mut histogram = Histogram::with_high_sigvdig(1_000, 2).unwrap();
+    histogram.record_value_with_count(100, 3).unwrap();
+    let raw = encode_histogram_v2(&histogram).unwrap();
+
+    for level in [0, 1, 6, 9] {
+        let encoded = encode_histogram_compressed_with_level(&histogram, level).unwrap();
+        let compressed = &encoded[8..];
+        assert_eq!(Some(3), decode_histogram_compressed(&encoded).unwrap().get_count_at_value(100));
+
+        // Keep the outer frame length valid: this specifically tests truncated
+        // zlib contents, not the frame reader's existing length checks.
+        for length in 0..compressed.len() {
+            let truncated = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &compressed[..length]);
+            assert!(
+                decode_histogram_compressed(&truncated).is_err(),
+                "level {level}, compressed length {length}"
+            );
+        }
+        let mut corrupt = compressed.to_vec();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decode_histogram_compressed(&compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &corrupt)),
+            Err(DecodeError::Compression(_))
+        ));
+
+        let mut trailing = compressed.to_vec();
+        trailing.extend_from_slice(&[1, 2, 3]);
+        assert!(matches!(
+            decode_histogram_compressed(&compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &trailing)),
+            Err(DecodeError::InvalidPayload)
+        ));
+        let concatenated = [compressed, compressed].concat();
+        assert!(matches!(
+            decode_histogram_compressed(&compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &concatenated)),
+            Err(DecodeError::InvalidPayload)
+        ));
+    }
+
+    let mut empty = raw[..V2_ENCODING_HEADER_SIZE].to_vec();
+    empty[4..8].copy_from_slice(&0_i32.to_be_bytes());
+    let encoded_empty = compressed_frame(V2_COMPRESSED_ENCODING_COOKIE, &zlib_compress(&empty));
+    assert_eq!(0, decode_histogram_compressed(&encoded_empty).unwrap().get_total_count());
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
+fn legacy_compressed_histograms_also_require_stream_completion() {
+    let histogram = Histogram::with_high_sigvdig(1_024, 2).unwrap();
+    let mut v1 = encode_histogram_v2(&histogram).unwrap();
+    v1.truncate(V2_ENCODING_HEADER_SIZE);
+    v1[..4].copy_from_slice(&(0x1c849301_u32 | 0x80).to_be_bytes());
+    v1[4..8].copy_from_slice(&16_i32.to_be_bytes());
+    v1.extend_from_slice(&0_i64.to_be_bytes());
+    v1.extend_from_slice(&3_i64.to_be_bytes());
+
+    let mut v0 = (0x1c849308_u32 | 0x80).to_be_bytes().to_vec();
+    v0.extend_from_slice(&2_i32.to_be_bytes());
+    v0.extend_from_slice(&1_i64.to_be_bytes());
+    v0.extend_from_slice(&1_024_i64.to_be_bytes());
+    v0.extend_from_slice(&3_i64.to_be_bytes());
+    v0.extend_from_slice(&0_i64.to_be_bytes());
+    v0.extend_from_slice(&3_i64.to_be_bytes());
+
+    for (cookie, raw) in [(0x1c849302_u32 | 0x80, v1), (0x1c849309_u32 | 0x80, v0)] {
+        let compressed = zlib_compress(&raw);
+        let encoded = compressed_frame(cookie, &compressed);
+        assert_eq!(Some(3), decode_histogram_compressed(&encoded).unwrap().get_count_at_value(1));
+        for cut in 1..=4 {
+            let truncated = compressed_frame(cookie, &compressed[..compressed.len() - cut]);
+            assert!(decode_histogram_compressed(&truncated).is_err());
+        }
+        let mut corrupt = compressed;
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decode_histogram_compressed(&compressed_frame(cookie, &corrupt)),
+            Err(DecodeError::Compression(_))
+        ));
+    }
+}
+
+#[cfg(feature = "encoding-compression")]
+#[test]
+fn compressed_double_histogram_rejects_truncated_inner_stream() {
+    let mut histogram = DoubleHistogram::new();
+    histogram.record_value(12.0).unwrap();
+    let encoded = encode_double_histogram_compressed(&histogram).unwrap();
+    for cut in 1..=4 {
+        let mut truncated = encoded[..encoded.len() - cut].to_vec();
+        let compressed_length = (truncated.len() - 24) as i32;
+        truncated[20..24].copy_from_slice(&compressed_length.to_be_bytes());
+        assert!(decode_double_histogram_compressed(&truncated).is_err());
+    }
+}
+
+fn assert_auto_grown_double_roundtrip(digits: u8, initial_ratio: u64, high_value: f64) {
+    // Stay off a power-of-two range boundary: the initial powi-based scaling
+    // has platform-dependent precision (also exercised by Miri).
+    let low_value = 1.5;
+    let mut histogram = DoubleHistogram::builder()
+        .significant_digits(digits)
+        .highest_to_lowest_value_ratio(initial_ratio)
+        .auto_resize(true)
+        .build()
+        .unwrap();
+    histogram.record_value(low_value).unwrap();
+    histogram.record_value(high_value).unwrap();
+    let ratio = histogram.get_highest_to_lowest_value_ratio();
+    assert!((ratio as u128) * 10_u128.pow(digits as u32) >= (1_u128 << 61));
+    // Decoding is deliberately more permissive than construction here.
+    assert!(DoubleHistogram::builder()
+        .significant_digits(digits)
+        .highest_to_lowest_value_ratio(ratio)
+        .build()
+        .is_err());
+    let raw = encode_double_histogram_v2(&histogram).unwrap();
+    let mut decoded = decode_double_histogram_v2(&raw).unwrap();
+    assert_eq!(ratio, decoded.get_highest_to_lowest_value_ratio());
+    assert_eq!(2, decoded.get_total_count());
+    assert_eq!(1, decoded.get_count_at_value(low_value));
+    assert_eq!(1, decoded.get_count_at_value(high_value));
+    // The accepted layout must remain usable, not just inspectable.
+    decoded.record_value(low_value).unwrap();
+    assert_eq!(2, decoded.get_count_at_value(low_value));
+
+    #[cfg(feature = "encoding-compression")]
+    {
+        let encoded = encode_double_histogram_compressed(&histogram).unwrap();
+        let decoded = decode_double_histogram_compressed(&encoded).unwrap();
+        assert_eq!(2, decoded.get_total_count());
+        assert_eq!(1, decoded.get_count_at_value(high_value));
+    }
+}
+
+#[test]
+fn double_decode_accepts_auto_grown_non_power_of_two_ratio() {
+    assert_auto_grown_double_roundtrip(3, 3, 5e15);
+}
+
+#[test]
+fn double_decode_accepts_auto_grown_zero_digit_layout() {
+    assert_auto_grown_double_roundtrip(0, 2, 5e18);
+}
+
+#[test]
+fn double_decode_rejects_unrepresentable_or_mismatched_layouts() {
+    let mut histogram = DoubleHistogram::new();
+    histogram.record_value(1.0).unwrap();
+    let mut raw = encode_double_histogram_v2(&histogram).unwrap();
+    for ratio in [0_i64, 1, 1_i64 << 62, i64::MAX] {
+        raw[8..16].copy_from_slice(&ratio.to_be_bytes());
+        assert!(matches!(decode_double_histogram_v2(&raw), Err(DecodeError::DoubleCreation(_))));
+    }
+    // A representable ratio must still agree with the encoded integer layout.
+    raw[8..16].copy_from_slice(&1_024_i64.to_be_bytes());
+    assert!(matches!(
+        decode_double_histogram_v2(&raw),
+        Err(DecodeError::DoubleCreation(
+            crate::core::DoubleCreationError::InternalHistogramMismatch
+        ))
+    ));
 }
 
 #[cfg(feature = "encoding-compression")]
@@ -229,7 +450,7 @@ fn compressed_frame(cookie: u32, compressed: &[u8]) -> Vec<u8> {
 #[cfg(feature = "encoding-compression")]
 #[test]
 fn compressed_double_histogram_roundtrip_preserves_counts() {
-    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
+    let mut histogram = DoubleHistogram::with_significant_digits(3).unwrap();
     histogram.record_value_with_count(2.0, 3).unwrap();
     histogram.record_value_with_count(16.0, 4).unwrap();
 
@@ -397,7 +618,7 @@ fn histogram_log_report_generates_interval_and_percentile_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
-    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
+    let mut histogram = DoubleHistogram::with_significant_digits(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.record_value(12.0).unwrap();
 
@@ -422,7 +643,7 @@ fn double_histogram_log_report_generates_interval_and_percentile_outputs() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn double_histogram_log_line_roundtrip_preserves_metadata_and_counts() {
-    let mut histogram = DoubleHistogram::<ThrowOnOverflow>::new(3).unwrap();
+    let mut histogram = DoubleHistogram::with_significant_digits(3).unwrap();
     histogram.record_value_with_count(1.5, 2).unwrap();
     histogram.meta_data_mut().set_tag_string("phase-a".to_string());
 
@@ -650,7 +871,7 @@ fn histogram_log_report_rejects_invalid_config() {
 fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
     use crate::concurrent::ConcurrentDoubleHistogram;
 
-    let mut histogram = ConcurrentDoubleHistogram::<ThrowOnOverflow>::builder()
+    let mut histogram = ConcurrentDoubleHistogram::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -682,7 +903,7 @@ fn concurrent_double_snapshot_log_line_roundtrip_preserves_counts() {
 #[cfg(feature = "encoding-base64")]
 #[test]
 fn histogram_log_writer_accepts_concurrent_double_snapshot() {
-    let recorder = DoubleRecorder::<ThrowOnOverflow>::builder()
+    let recorder = DoubleRecorder::builder()
         .highest_to_lowest_value_ratio(1024)
         .significant_digits(2)
         .build()
@@ -709,7 +930,7 @@ fn histogram_log_writer_accepts_concurrent_double_snapshot() {
 fn histogram_log_report_rejects_mixed_integer_and_double_logs() {
     let mut integer_histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     integer_histogram.record_value(100).unwrap();
-    let mut double_histogram = DoubleHistogram::<ThrowOnOverflow>::new(2).unwrap();
+    let mut double_histogram = DoubleHistogram::with_significant_digits(2).unwrap();
     double_histogram.record_value(1.5).unwrap();
 
     let log = format!(

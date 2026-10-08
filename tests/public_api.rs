@@ -5,6 +5,27 @@ use hdrhistogram::{
 };
 
 #[test]
+fn public_capability_traits_support_generic_iteration_and_encoding() {
+    use hdrhistogram::encoding::{decode_histogram_v2, encode_histogram_v2, EncodableHistogram};
+    use hdrhistogram::iteration::{IterableHistogram, RecordedValuesIterator};
+
+    fn recorded_count<H: IterableHistogram>(histogram: &H) -> u64 {
+        let mut values = RecordedValuesIterator::new(histogram);
+        values.reset();
+        values.map(|value| value.count_at_value_iterated_to).sum()
+    }
+
+    fn roundtrip<H: EncodableHistogram>(histogram: &H) -> hdrhistogram::Histogram {
+        decode_histogram_v2(&encode_histogram_v2(histogram).unwrap()).unwrap()
+    }
+
+    let mut histogram = hdrhistogram::Histogram::builder().significant_digits(2).build().unwrap();
+    histogram.record_value_with_count(42, 3).unwrap();
+    assert_eq!(3, recorded_count(&histogram));
+    assert_eq!(3, roundtrip(&histogram).get_total_count());
+}
+
+#[test]
 fn double_aliases_construct_without_policy_annotations() {
     let mut histogram = DoubleHistogram::new();
     histogram.record_value(42.0).unwrap();

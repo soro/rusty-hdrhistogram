@@ -8,7 +8,7 @@ use crate::concurrent::{ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
 #[cfg(feature = "encoding-compression")]
 use crate::core::HistogramSettings;
 use crate::core::{ConstructableHistogram, CreationError, DoubleCreationError, ReadableHistogram};
-use crate::st::{DoubleHistogram, Histogram};
+use crate::st::{DoubleHistogram, DoubleHistogramWithPolicy, Histogram};
 
 pub use crate::core::{EncodableHistogram, OverflowPolicy};
 
@@ -17,14 +17,14 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 #[cfg(feature = "encoding-base64")]
 use chrono::{Local, TimeZone};
 #[cfg(feature = "encoding-compression")]
-use flate2::{read::ZlibDecoder, read::ZlibEncoder, Compression};
+use flate2::{read::ZlibEncoder, Compression, Decompress, FlushDecompress, Status};
 #[cfg(feature = "encoding-base64")]
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
+#[cfg(feature = "encoding-compression")]
+use std::io::Read;
 #[cfg(feature = "encoding-base64")]
 use std::io::{BufRead, Cursor, Write};
-#[cfg(feature = "encoding-compression")]
-use std::io::{ErrorKind, Read};
 
 const V0_ENCODING_COOKIE_BASE: u32 = 0x1c849308;
 const V0_COMPRESSED_ENCODING_COOKIE_BASE: u32 = 0x1c849309;
@@ -677,7 +677,7 @@ impl<W: Write> HistogramLogWriter<W> {
 
     pub fn write_double_interval<P: OverflowPolicy>(
         &mut self,
-        histogram: &DoubleHistogram<P>,
+        histogram: &DoubleHistogramWithPolicy<P>,
         start_timestamp_sec: f64,
         end_timestamp_sec: f64,
     ) -> Result<(), EncodeError> {
@@ -889,6 +889,11 @@ pub fn decode_histogram_with_min_highest_trackable_value(bytes: &[u8], min_highe
         highest_trackable_value,
         number_of_significant_value_digits as u8,
     )?;
+    // Range shifts rotate by whole half-buckets. The low-half-bucket shift
+    // path relies on this alignment when accessing the normalized count array.
+    if normalizing_index_offset % histogram.settings().sub_bucket_half_count as i32 != 0 {
+        return Err(DecodeError::InvalidPayload);
+    }
     histogram.set_integer_to_double_value_conversion_ratio(integer_to_double_value_conversion_ratio);
     histogram.set_normalizing_index_offset(normalizing_index_offset);
     histogram.set_auto_resize(true);
@@ -913,7 +918,7 @@ fn encode_double_histogram_v2_from_integer<H: EncodableHistogram>(
     Ok(encoded)
 }
 
-pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_v2<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_v2_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -932,8 +937,11 @@ pub fn encode_concurrent_double_read_view_v2(histogram: &ConcurrentDoubleReadVie
 pub fn encode_concurrent_double_snapshot_v2<P: OverflowPolicy>(
     histogram: &ConcurrentDoubleSnapshot<'_, P>,
 ) -> Result<Vec<u8>, EncodeError> {
-    let view = histogram.read_view();
-    encode_concurrent_double_read_view_v2(&view)
+    encode_double_histogram_v2_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
 }
 
 pub fn decode_double_histogram_v2(bytes: &[u8]) -> Result<DoubleHistogram, DecodeError> {
@@ -1014,7 +1022,7 @@ fn encode_double_histogram_compressed_from_integer<H: EncodableHistogram>(
 }
 
 #[cfg(feature = "encoding-compression")]
-pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<Vec<u8>, EncodeError> {
+pub fn encode_double_histogram_compressed<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_from_integer(
         histogram.integer_histogram(),
         histogram.get_number_of_significant_value_digits(),
@@ -1035,8 +1043,11 @@ pub fn encode_concurrent_double_read_view_compressed(histogram: &ConcurrentDoubl
 pub fn encode_concurrent_double_snapshot_compressed<P: OverflowPolicy>(
     histogram: &ConcurrentDoubleSnapshot<'_, P>,
 ) -> Result<Vec<u8>, EncodeError> {
-    let view = histogram.read_view();
-    encode_concurrent_double_read_view_compressed(&view)
+    encode_double_histogram_compressed_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+    )
 }
 
 #[cfg(feature = "encoding-compression")]
@@ -1060,7 +1071,7 @@ fn encode_double_histogram_compressed_with_level_from_integer<H: EncodableHistog
 
 #[cfg(feature = "encoding-compression")]
 pub fn encode_double_histogram_compressed_with_level<P: OverflowPolicy>(
-    histogram: &DoubleHistogram<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     compression_level: u32,
 ) -> Result<Vec<u8>, EncodeError> {
     encode_double_histogram_compressed_with_level_from_integer(
@@ -1089,8 +1100,12 @@ pub fn encode_concurrent_double_snapshot_compressed_with_level<P: OverflowPolicy
     histogram: &ConcurrentDoubleSnapshot<'_, P>,
     compression_level: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    let view = histogram.read_view();
-    encode_concurrent_double_read_view_compressed_with_level(&view, compression_level)
+    encode_double_histogram_compressed_with_level_from_integer(
+        histogram,
+        histogram.get_number_of_significant_value_digits(),
+        histogram.get_highest_to_lowest_value_ratio(),
+        compression_level,
+    )
 }
 
 #[cfg(feature = "encoding-compression")]
@@ -1128,7 +1143,7 @@ pub fn decode_histogram_base64(encoded: &str) -> Result<Histogram, DecodeError> 
 }
 
 #[cfg(feature = "encoding-base64")]
-pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogram<P>) -> Result<String, EncodeError> {
+pub fn encode_double_histogram_base64<P: OverflowPolicy>(histogram: &DoubleHistogramWithPolicy<P>) -> Result<String, EncodeError> {
     Ok(BASE64_STANDARD.encode(encode_double_histogram_compressed(histogram)?))
 }
 
@@ -1205,7 +1220,7 @@ pub fn encode_histogram_log_line_with_max_value_unit_ratio<H: EncodableHistogram
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
-    histogram: &DoubleHistogram<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
 ) -> Result<String, EncodeError> {
@@ -1219,7 +1234,7 @@ pub fn encode_double_histogram_log_line<P: OverflowPolicy>(
 
 #[cfg(feature = "encoding-base64")]
 pub fn encode_double_histogram_log_line_with_max_value_unit_ratio<P: OverflowPolicy>(
-    histogram: &DoubleHistogram<P>,
+    histogram: &DoubleHistogramWithPolicy<P>,
     start_timestamp_sec: f64,
     end_timestamp_sec: f64,
     max_value_unit_ratio: f64,
@@ -1288,12 +1303,14 @@ pub fn encode_concurrent_double_snapshot_log_line_with_max_value_unit_ratio<P: O
     end_timestamp_sec: f64,
     max_value_unit_ratio: f64,
 ) -> Result<String, EncodeError> {
-    let view = histogram.read_view();
-    encode_concurrent_double_read_view_log_line_with_max_value_unit_ratio(
-        &view,
+    let compressed = encode_concurrent_double_snapshot_compressed_with_level(histogram, 9)?;
+    let payload = BASE64_STANDARD.encode(compressed);
+    encode_log_line(
+        histogram.meta_data().tag.as_deref(),
         start_timestamp_sec,
         end_timestamp_sec,
-        max_value_unit_ratio,
+        histogram.get_max_value() / checked_max_value_unit_ratio(max_value_unit_ratio)?,
+        &payload,
     )
 }
 
@@ -2245,31 +2262,109 @@ fn decompress_histogram_raw(compressed_cookie: u32, compressed: &[u8], min_highe
         _ => return Err(DecodeError::InvalidCookie(compressed_cookie)),
     };
 
-    let mut decoder = ZlibDecoder::new(compressed);
+    let mut decoder = HistogramInflater::new(compressed);
     let mut raw = vec![0; header_size];
-    decoder.read_exact(&mut raw).map_err(decode_compression_read_error)?;
+    decoder.read_exact(&mut raw)?;
 
     let payload_limit = compressed_payload_limit_from_raw_header(&raw, min_highest_trackable_value)?;
     if let Some(payload_length) = payload_limit.exact_length {
         raw.try_reserve_exact(payload_length).map_err(|_| DecodeError::InvalidPayload)?;
         let payload_start = raw.len();
         raw.resize(payload_start + payload_length, 0);
-        decoder
-            .read_exact(&mut raw[payload_start..])
-            .map_err(decode_compression_read_error)?;
+        decoder.read_exact(&mut raw[payload_start..])?;
     } else {
-        let max_payload_length = payload_limit.max_length;
-        let read_limit = max_payload_length.checked_add(1).ok_or(DecodeError::InvalidPayload)?;
-        decoder
-            .take(read_limit as u64)
-            .read_to_end(&mut raw)
-            .map_err(decode_compression_read_error)?;
-        if raw.len() > header_size + max_payload_length {
-            return Err(DecodeError::InvalidPayload);
+        // V0 has no payload length. Bound both output and allocation by its
+        // validated layout, without preallocating the entire maximum payload.
+        let mut chunk = [0; 8_192];
+        while !decoder.finished {
+            let remaining = payload_limit.max_length - (raw.len() - header_size);
+            let probe_length = chunk.len().min(remaining.saturating_add(1));
+            let count = decoder.inflate(&mut chunk[..probe_length])?;
+            if count > remaining {
+                return Err(DecodeError::InvalidPayload);
+            }
+            raw.try_reserve(count).map_err(|_| DecodeError::InvalidPayload)?;
+            raw.extend_from_slice(&chunk[..count]);
         }
     }
 
+    decoder.finish()?;
     Ok(raw)
+}
+
+/// Unlike the `Read` adapter, this distinguishes exhausted input from a
+/// completed zlib stream. StreamEnd also confirms the Adler-32 checksum.
+#[cfg(feature = "encoding-compression")]
+struct HistogramInflater<'a> {
+    decoder: Decompress,
+    input: &'a [u8],
+    finished: bool,
+}
+
+#[cfg(feature = "encoding-compression")]
+impl<'a> HistogramInflater<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self {
+            decoder: Decompress::new(true),
+            input,
+            finished: false,
+        }
+    }
+
+    fn inflate(&mut self, output: &mut [u8]) -> Result<usize, DecodeError> {
+        debug_assert!(!output.is_empty());
+        if self.finished {
+            return Ok(0);
+        }
+        let before_in = self.decoder.total_in();
+        let before_out = self.decoder.total_out();
+        let status = self
+            .decoder
+            .decompress(self.input, output, FlushDecompress::None)
+            .map_err(|err| DecodeError::Compression(err.to_string()))?;
+        let consumed = (self.decoder.total_in() - before_in) as usize;
+        let produced = (self.decoder.total_out() - before_out) as usize;
+        self.input = &self.input[consumed..];
+        self.finished = status == Status::StreamEnd;
+
+        if !self.finished && consumed == 0 && produced == 0 {
+            // With nonempty output space and all compressed input available,
+            // the only recoverable lack of progress would require more input.
+            return Err(if self.input.is_empty() {
+                DecodeError::UnexpectedEof
+            } else {
+                DecodeError::InvalidPayload
+            });
+        }
+        Ok(produced)
+    }
+
+    fn read_exact(&mut self, mut output: &mut [u8]) -> Result<(), DecodeError> {
+        while !output.is_empty() {
+            if self.finished {
+                return Err(DecodeError::UnexpectedEof);
+            }
+            let count = self.inflate(output)?;
+            output = &mut output[count..];
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), DecodeError> {
+        // Process the trailer, but reject extra inflated bytes immediately
+        // rather than draining arbitrary padding or allocating more storage.
+        let mut probe = [0; 1];
+        while !self.finished {
+            if self.inflate(&mut probe)? != 0 {
+                return Err(DecodeError::InvalidPayload);
+            }
+        }
+        // The frame's declared compressed contents must be exactly one stream.
+        if !self.input.is_empty() {
+            return Err(DecodeError::InvalidPayload);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "encoding-compression")]
@@ -2358,15 +2453,6 @@ fn compressed_payload_limit_from_raw_header(
         exact_length: payload_length,
         max_length,
     })
-}
-
-#[cfg(feature = "encoding-compression")]
-fn decode_compression_read_error(err: std::io::Error) -> DecodeError {
-    if err.kind() == ErrorKind::UnexpectedEof {
-        DecodeError::UnexpectedEof
-    } else {
-        DecodeError::Compression(err.to_string())
-    }
 }
 
 fn read_significant_value_digits(reader: &mut Reader<'_>) -> Result<u8, DecodeError> {

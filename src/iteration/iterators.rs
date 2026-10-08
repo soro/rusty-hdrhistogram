@@ -1,3 +1,7 @@
+// Iterator constructors expose public capability traits, while their safe
+// operations share the crate-private read interface with captured live views.
+#![allow(private_bounds)]
+
 use crate::core::{IterableHistogram, ReadableHistogram};
 use crate::iteration::histogram_iterator::HistogramIterator;
 use crate::iteration::iteration_error::IterationError;

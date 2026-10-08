@@ -1,6 +1,6 @@
-use crate::concurrent::double_histogram::{ConcurrentDoubleHistogram, ConcurrentDoubleReadView, ConcurrentDoubleSnapshot};
+use crate::concurrent::double_histogram::{ConcurrentDoubleHistogramWithPolicy, ConcurrentDoubleSnapshot};
 use crate::concurrent::recordable_histogram::RecordableHistogram;
-use crate::concurrent::recorder::{DoubleRecorder, Recorder, SingleWriterDoubleSampler, SingleWriterSampler};
+use crate::concurrent::recorder::{DoubleRecorderWithPolicy, Recorder, SingleWriterDoubleSamplerWithPolicy, SingleWriterSampler};
 use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
 use crate::concurrent::snapshot::{FixedSnapshot, ResizableSnapshot, Snapshot};
 use crate::concurrent::static_histogram::FixedConcurrentHistogram;
@@ -9,7 +9,7 @@ use crate::core::OverflowPolicy;
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
 };
-use crate::st::{DoubleHistogram, Histogram};
+use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -96,16 +96,27 @@ impl<'a, 'b: 'a, T: RecordableHistogram> Drop for IntervalSampleCore<'a, 'b, T> 
 ///
 /// While this value is alive, it owns the recorder's exclusive sampling lease.
 /// Writers continue recording into the next interval.
+///
+/// An iterator borrows the frozen sample and prevents recycling its buffers:
+///
+/// ```compile_fail,E0505
+/// use hdrhistogram::DoubleRecorder;
+/// let recorder = DoubleRecorder::new();
+/// let sample = recorder.begin_interval_sample();
+/// let mut values = sample.recorded_values();
+/// let next_sample = sample.resample();
+/// let next_value = values.next();
+/// ```
 pub struct DoubleIntervalSample<'a, 'b: 'a, P: OverflowPolicy> {
-    parent_recorder: &'a DoubleRecorder<P>,
-    histogram: AtomicPtr<ConcurrentDoubleHistogram<P>>,
+    parent_recorder: &'a DoubleRecorderWithPolicy<P>,
+    histogram: AtomicPtr<ConcurrentDoubleHistogramWithPolicy<P>>,
     guard: PhaseFlipGuard<'b>,
 }
 
 impl<'a, 'b: 'a, P: OverflowPolicy> DoubleIntervalSample<'a, 'b, P> {
     pub(in crate::concurrent) fn new(
-        parent_recorder: &'a DoubleRecorder<P>,
-        histogram: *mut ConcurrentDoubleHistogram<P>,
+        parent_recorder: &'a DoubleRecorderWithPolicy<P>,
+        histogram: *mut ConcurrentDoubleHistogramWithPolicy<P>,
         guard: PhaseFlipGuard<'b>,
     ) -> Self {
         DoubleIntervalSample {
@@ -129,37 +140,39 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleIntervalSample<'a, 'b, P> {
         }
     }
 
-    fn raw_histogram(&self) -> &ConcurrentDoubleHistogram<P> {
+    fn raw_histogram(&self) -> &ConcurrentDoubleHistogramWithPolicy<P> {
         unsafe { &*self.histogram.load(Ordering::Acquire) }
     }
 
     pub fn snapshot(&self) -> ConcurrentDoubleSnapshot<'_, P> {
-        ConcurrentDoubleSnapshot::new(self.raw_histogram())
+        // SAFETY: the recorder swapped this histogram out and drained its
+        // writers before constructing the sample. Borrowing the sample prevents
+        // its consuming resample/drop from recycling or freeing the counts.
+        unsafe { ConcurrentDoubleSnapshot::new(self.raw_histogram()) }
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleReadView<'_>> {
-        self.raw_histogram().percentiles_snapshot(percentile_ticks_per_half_distance)
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleSnapshot<'_, P>> {
+        DoublePercentileIterator::new(self.snapshot(), percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleReadView<'_>> {
-        self.raw_histogram().linear_bucket_values_snapshot(value_units_per_bucket)
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleSnapshot<'_, P>> {
+        DoubleLinearIterator::new(self.snapshot(), value_units_per_bucket)
     }
 
     pub fn logarithmic_bucket_values(
         &self,
         value_units_in_first_bucket: f64,
         log_base: f64,
-    ) -> DoubleLogarithmicIterator<ConcurrentDoubleReadView<'_>> {
-        self.raw_histogram()
-            .logarithmic_bucket_values_snapshot(value_units_in_first_bucket, log_base)
+    ) -> DoubleLogarithmicIterator<ConcurrentDoubleSnapshot<'_, P>> {
+        DoubleLogarithmicIterator::new(self.snapshot(), value_units_in_first_bucket, log_base)
     }
 
-    pub fn all_values(&self) -> DoubleAllValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.raw_histogram().all_values_snapshot()
+    pub fn all_values(&self) -> DoubleAllValuesIterator<ConcurrentDoubleSnapshot<'_, P>> {
+        DoubleAllValuesIterator::new(self.snapshot())
     }
 
-    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleReadView<'_>> {
-        self.raw_histogram().recorded_values_snapshot()
+    pub fn recorded_values(&self) -> DoubleRecordedValuesIterator<ConcurrentDoubleSnapshot<'_, P>> {
+        DoubleRecordedValuesIterator::new(self.snapshot())
     }
 }
 
@@ -223,12 +236,15 @@ impl Drop for SingleWriterIntervalSample<'_> {
 /// While this value is alive, it owns the recorder's exclusive sampling lease.
 /// The single writer continues recording into the next interval after the swap.
 pub struct SingleWriterDoubleIntervalSample<'a, P: OverflowPolicy> {
-    parent_sampler: &'a mut SingleWriterDoubleSampler<P>,
-    histogram: Option<Box<DoubleHistogram<P>>>,
+    parent_sampler: &'a mut SingleWriterDoubleSamplerWithPolicy<P>,
+    histogram: Option<Box<DoubleHistogramWithPolicy<P>>>,
 }
 
 impl<'a, P: OverflowPolicy> SingleWriterDoubleIntervalSample<'a, P> {
-    pub(in crate::concurrent) fn new(parent_sampler: &'a mut SingleWriterDoubleSampler<P>, histogram: Box<DoubleHistogram<P>>) -> Self {
+    pub(in crate::concurrent) fn new(
+        parent_sampler: &'a mut SingleWriterDoubleSamplerWithPolicy<P>,
+        histogram: Box<DoubleHistogramWithPolicy<P>>,
+    ) -> Self {
         SingleWriterDoubleIntervalSample {
             parent_sampler,
             histogram: Some(histogram),
@@ -247,14 +263,14 @@ impl<'a, P: OverflowPolicy> SingleWriterDoubleIntervalSample<'a, P> {
         self
     }
 
-    fn raw_histogram(&self) -> &DoubleHistogram<P> {
+    fn raw_histogram(&self) -> &DoubleHistogramWithPolicy<P> {
         self.histogram
             .as_deref()
             .expect("single-writer double interval sample must own its histogram")
     }
 
     /// Return a read-only view of the most recently sampled histogram.
-    pub fn snapshot(&self) -> &DoubleHistogram<P> {
+    pub fn snapshot(&self) -> &DoubleHistogramWithPolicy<P> {
         self.raw_histogram()
     }
 }
