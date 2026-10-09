@@ -1,23 +1,29 @@
 #![allow(dead_code)]
 
-use loom::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use loom::sync::{Arc, Mutex, MutexGuard};
 use loom::thread;
 use std::mem;
 
 pub struct ModelPhaser {
-    start_epoch: AtomicIsize,
-    even_end_epoch: AtomicIsize,
-    odd_end_epoch: AtomicIsize,
+    start_epoch: AtomicI64,
+    even_end_epoch: AtomicI64,
+    odd_end_epoch: AtomicI64,
     reader_lock: Mutex<()>,
 }
 
 impl ModelPhaser {
     pub fn new() -> Self {
+        Self::with_completed_writes(0, false)
+    }
+
+    pub fn with_completed_writes(completed_writes: u32, odd_phase: bool) -> Self {
+        let initial_epoch = if odd_phase { i64::MIN } else { 0 };
+        let completed_epoch = initial_epoch + i64::from(completed_writes);
         Self {
-            start_epoch: AtomicIsize::new(0),
-            even_end_epoch: AtomicIsize::new(0),
-            odd_end_epoch: AtomicIsize::new(isize::MIN),
+            start_epoch: AtomicI64::new(completed_epoch),
+            even_end_epoch: AtomicI64::new(if odd_phase { 0 } else { completed_epoch }),
+            odd_end_epoch: AtomicI64::new(if odd_phase { completed_epoch } else { i64::MIN }),
             reader_lock: Mutex::new(()),
         }
     }
@@ -42,7 +48,7 @@ impl ModelPhaser {
 }
 
 pub struct WriterCriticalSectionGuard<'a> {
-    epoch: &'a AtomicIsize,
+    epoch: &'a AtomicI64,
 }
 
 impl Drop for WriterCriticalSectionGuard<'_> {
@@ -60,7 +66,7 @@ impl PhaseFlipGuard<'_> {
     pub fn flip(&self) {
         // Keep this ordering mirror aligned with src/concurrent/writer_reader_phaser.rs.
         let next_phase_is_even = self.parent.start_epoch.load(Ordering::SeqCst) < 0;
-        let initial_start_value = if next_phase_is_even { 0 } else { isize::MIN };
+        let initial_start_value = if next_phase_is_even { 0 } else { i64::MIN };
 
         if next_phase_is_even {
             self.parent.even_end_epoch.store(initial_start_value, Ordering::Relaxed);

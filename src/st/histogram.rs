@@ -7,6 +7,7 @@ use crate::st::backing_array::BackingArray;
 use std;
 use std::borrow::Borrow;
 use std::marker::PhantomData;
+use std::num::{NonZeroU32, NonZeroU64};
 
 const DEFAULT_SIGNIFICANT_VALUE_DIGITS: u8 = 3;
 
@@ -823,18 +824,18 @@ impl<T: Counter> HistogramWithCounter<T> {
             .map_err(RecordError::ResizeFailed)
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<&'_ Self> {
         PercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+    pub fn linear_bucket_values(&self, value_units_per_bucket: NonZeroU64) -> LinearIterator<&'_ Self> {
         LinearIterator::new(self, value_units_per_bucket)
     }
 
     /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
     pub fn logarithmic_bucket_values(
         &self,
-        value_units_in_first_bucket: u64,
+        value_units_in_first_bucket: NonZeroU64,
         log_base: f64,
     ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)

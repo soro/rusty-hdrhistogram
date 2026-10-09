@@ -8,6 +8,7 @@ use crate::iteration::iteration_error::IterationError;
 use crate::iteration::iteration_state::IterationState;
 use crate::iteration::iteration_strategy::*;
 use crate::iteration::{DoubleIterationValue, IterationValue};
+use std::num::{NonZeroU32, NonZeroU64};
 
 /// Newtype wrappers for HistogramIterator with concrete strategies
 pub struct AllValuesIterator<H>(HistogramIterator<H, AllValuesStrategy>);
@@ -151,16 +152,24 @@ impl<H: IterableHistogram> Iterator for RecordedValuesIterator<H> {
     }
 }
 
+/// Linear buckets with a nonzero integer width.
+///
+/// ```compile_fail
+/// use hdrhistogram::{Histogram, iteration::LinearIterator};
+/// let histogram = Histogram::builder().build().unwrap();
+/// let values = LinearIterator::new(&histogram, 0);
+/// ```
 pub struct LinearIterator<H>(HistogramIterator<H, LinearStrategy>);
 
 impl<H: IterableHistogram> LinearIterator<H> {
-    pub fn new(histogram: H, value_units_per_bucket: u64) -> LinearIterator<H> {
+    pub fn new(histogram: H, value_units_per_bucket: NonZeroU64) -> LinearIterator<H> {
         LinearIterator::from_readable(histogram, value_units_per_bucket)
     }
 }
 
 impl<H: ReadableHistogram> LinearIterator<H> {
-    pub(crate) fn from_readable(histogram: H, value_units_per_bucket: u64) -> LinearIterator<H> {
+    pub(crate) fn from_readable(histogram: H, value_units_per_bucket: NonZeroU64) -> LinearIterator<H> {
+        let value_units_per_bucket = value_units_per_bucket.get();
         let highest_level = value_units_per_bucket - 1;
         let strategy = LinearStrategy {
             value_units_per_bucket,
@@ -175,7 +184,8 @@ impl<H: ReadableHistogram> LinearIterator<H> {
         })
     }
 
-    pub fn reset(&mut self, value_units_per_bucket: u64) {
+    pub fn reset(&mut self, value_units_per_bucket: NonZeroU64) {
+        let value_units_per_bucket = value_units_per_bucket.get();
         self.0.state.reset(&self.0.histogram);
 
         let strategy = &mut self.0.strategy;
@@ -202,12 +212,16 @@ impl<H: IterableHistogram> Iterator for LinearIterator<H> {
     }
 }
 
+/// Logarithmic buckets with a nonzero integer first-bucket width.
+///
+/// ```compile_fail
+/// use hdrhistogram::{Histogram, iteration::LogarithmicIterator};
+/// let histogram = Histogram::builder().build().unwrap();
+/// let values = LogarithmicIterator::new(&histogram, 0, 2.0);
+/// ```
 pub struct LogarithmicIterator<H>(HistogramIterator<H, LogarithmicStrategy>);
 
-fn validate_logarithmic_parameters(value_units_in_first_bucket: u64, log_base: f64) -> Result<(), IterationError> {
-    if value_units_in_first_bucket == 0 {
-        return Err(IterationError::InvalidBucketWidth);
-    }
+fn validate_log_base(log_base: f64) -> Result<(), IterationError> {
     if !log_base.is_finite() || log_base <= 1.0 {
         return Err(IterationError::InvalidLogBase);
     }
@@ -216,10 +230,9 @@ fn validate_logarithmic_parameters(value_units_in_first_bucket: u64, log_base: f
 
 impl<H: IterableHistogram> LogarithmicIterator<H> {
     /// # Errors
-    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
-    /// is zero, or [`IterationError::InvalidLogBase`] if `log_base` is non-finite
-    /// or at most one.
-    pub fn new(histogram: H, value_units_in_first_bucket: u64, log_base: f64) -> Result<LogarithmicIterator<H>, IterationError> {
+    /// Returns [`IterationError::InvalidLogBase`] if `log_base` is non-finite
+    /// or at most one. The first bucket width is nonzero by construction.
+    pub fn new(histogram: H, value_units_in_first_bucket: NonZeroU64, log_base: f64) -> Result<LogarithmicIterator<H>, IterationError> {
         LogarithmicIterator::from_readable(histogram, value_units_in_first_bucket, log_base)
     }
 }
@@ -227,10 +240,11 @@ impl<H: IterableHistogram> LogarithmicIterator<H> {
 impl<H: ReadableHistogram> LogarithmicIterator<H> {
     pub(crate) fn from_readable(
         histogram: H,
-        value_units_in_first_bucket: u64,
+        value_units_in_first_bucket: NonZeroU64,
         log_base: f64,
     ) -> Result<LogarithmicIterator<H>, IterationError> {
-        validate_logarithmic_parameters(value_units_in_first_bucket, log_base)?;
+        validate_log_base(log_base)?;
+        let value_units_in_first_bucket = value_units_in_first_bucket.get();
         let hvrl = value_units_in_first_bucket - 1;
         let strategy = LogarithmicStrategy {
             value_units_in_first_bucket,
@@ -248,11 +262,11 @@ impl<H: ReadableHistogram> LogarithmicIterator<H> {
     }
 
     /// # Errors
-    /// Returns [`IterationError::InvalidBucketWidth`] if the first bucket width
-    /// is zero, or [`IterationError::InvalidLogBase`] if `log_base` is non-finite
+    /// Returns [`IterationError::InvalidLogBase`] if `log_base` is non-finite
     /// or at most one. An error leaves the iterator unchanged.
-    pub fn reset(&mut self, value_units_in_first_bucket: u64, log_base: f64) -> Result<(), IterationError> {
-        validate_logarithmic_parameters(value_units_in_first_bucket, log_base)?;
+    pub fn reset(&mut self, value_units_in_first_bucket: NonZeroU64, log_base: f64) -> Result<(), IterationError> {
+        validate_log_base(log_base)?;
+        let value_units_in_first_bucket = value_units_in_first_bucket.get();
         self.0.state.reset(&self.0.histogram);
 
         let hvrl = value_units_in_first_bucket - 1;
@@ -282,18 +296,25 @@ impl<H: IterableHistogram> Iterator for LogarithmicIterator<H> {
     }
 }
 
+/// Percentile buckets with a nonzero number of ticks per half-distance.
+///
+/// ```compile_fail
+/// use hdrhistogram::{Histogram, iteration::PercentileIterator};
+/// let histogram = Histogram::builder().build().unwrap();
+/// let values = PercentileIterator::new(&histogram, 0);
+/// ```
 pub struct PercentileIterator<H>(HistogramIterator<H, PercentileStrategy>);
 
 impl<H: IterableHistogram> PercentileIterator<H> {
-    pub fn new(histogram: H, percentile_ticks_per_half_distance: u32) -> PercentileIterator<H> {
+    pub fn new(histogram: H, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<H> {
         PercentileIterator::from_readable(histogram, percentile_ticks_per_half_distance)
     }
 }
 
 impl<H: ReadableHistogram> PercentileIterator<H> {
-    pub(crate) fn from_readable(histogram: H, percentile_ticks_per_half_distance: u32) -> PercentileIterator<H> {
+    pub(crate) fn from_readable(histogram: H, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<H> {
         let strategy = PercentileStrategy {
-            percentile_ticks_per_half_distance: percentile_ticks_per_half_distance as isize,
+            percentile_ticks_per_half_distance,
             percentile_level_to_iterate_to: 0.0,
             percentile_level_to_iterate_from: 0.0,
             reached_last_recorded_value: false,
@@ -306,12 +327,12 @@ impl<H: ReadableHistogram> PercentileIterator<H> {
         })
     }
 
-    pub fn reset(&mut self, percentile_ticks_per_half_distance: u32) {
+    pub fn reset(&mut self, percentile_ticks_per_half_distance: NonZeroU32) {
         self.0.state.reset(&self.0.histogram);
 
         let strategy = &mut self.0.strategy;
 
-        strategy.percentile_ticks_per_half_distance = percentile_ticks_per_half_distance as isize;
+        strategy.percentile_ticks_per_half_distance = percentile_ticks_per_half_distance;
         strategy.percentile_level_to_iterate_to = 0.0;
         strategy.percentile_level_to_iterate_from = 0.0;
         strategy.reached_last_recorded_value = false;
@@ -392,21 +413,28 @@ impl<H: IterableHistogram> Iterator for DoubleRecordedValuesIterator<H> {
 pub struct DoubleLinearIterator<H>(LinearIterator<H>);
 
 impl<H: IterableHistogram> DoubleLinearIterator<H> {
-    pub fn new(histogram: H, value_units_per_bucket: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket).expect("invalid linear bucket width");
-        DoubleLinearIterator(LinearIterator::new(histogram, integer_units))
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the width is non-finite,
+    /// non-positive, or too large in integer units. Positive widths smaller
+    /// than one integer unit round up to one.
+    pub fn new(histogram: H, value_units_per_bucket: f64) -> Result<Self, IterationError> {
+        Self::from_readable(histogram, value_units_per_bucket)
     }
 }
 
 impl<H: ReadableHistogram> DoubleLinearIterator<H> {
-    pub(crate) fn from_readable(histogram: H, value_units_per_bucket: f64) -> Self {
-        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket).expect("invalid linear bucket width");
-        DoubleLinearIterator(LinearIterator::from_readable(histogram, integer_units))
+    pub(crate) fn from_readable(histogram: H, value_units_per_bucket: f64) -> Result<Self, IterationError> {
+        let integer_units = double_value_units_to_integer_units(&histogram, value_units_per_bucket)?;
+        Ok(DoubleLinearIterator(LinearIterator::from_readable(histogram, integer_units)))
     }
 
-    pub fn reset(&mut self, value_units_per_bucket: f64) {
-        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_per_bucket).expect("invalid linear bucket width");
+    /// # Errors
+    /// Returns [`IterationError::InvalidBucketWidth`] if the width is non-finite,
+    /// non-positive, or too large in integer units. An error leaves the iterator unchanged.
+    pub fn reset(&mut self, value_units_per_bucket: f64) -> Result<(), IterationError> {
+        let units = double_value_units_to_integer_units(self.0.histogram(), value_units_per_bucket)?;
         self.0.reset(units);
+        Ok(())
     }
 
     pub fn try_next(&mut self) -> Result<Option<DoubleIterationValue>, IterationError> {
@@ -471,17 +499,17 @@ impl<H: IterableHistogram> Iterator for DoubleLogarithmicIterator<H> {
 pub struct DoublePercentileIterator<H>(PercentileIterator<H>);
 
 impl<H: IterableHistogram> DoublePercentileIterator<H> {
-    pub fn new(histogram: H, percentile_ticks_per_half_distance: u32) -> Self {
+    pub fn new(histogram: H, percentile_ticks_per_half_distance: NonZeroU32) -> Self {
         DoublePercentileIterator(PercentileIterator::new(histogram, percentile_ticks_per_half_distance))
     }
 }
 
 impl<H: ReadableHistogram> DoublePercentileIterator<H> {
-    pub(crate) fn from_readable(histogram: H, percentile_ticks_per_half_distance: u32) -> Self {
+    pub(crate) fn from_readable(histogram: H, percentile_ticks_per_half_distance: NonZeroU32) -> Self {
         DoublePercentileIterator(PercentileIterator::from_readable(histogram, percentile_ticks_per_half_distance))
     }
 
-    pub fn reset(&mut self, percentile_ticks_per_half_distance: u32) {
+    pub fn reset(&mut self, percentile_ticks_per_half_distance: NonZeroU32) {
         self.0.reset(percentile_ticks_per_half_distance);
     }
 
@@ -498,7 +526,7 @@ impl<H: IterableHistogram> Iterator for DoublePercentileIterator<H> {
     }
 }
 
-fn double_value_units_to_integer_units<T: ReadableHistogram>(histogram: &T, value_units: f64) -> Result<u64, IterationError> {
+fn double_value_units_to_integer_units<T: ReadableHistogram>(histogram: &T, value_units: f64) -> Result<NonZeroU64, IterationError> {
     if !value_units.is_finite() || value_units <= 0.0 {
         return Err(IterationError::InvalidBucketWidth);
     }
@@ -506,5 +534,5 @@ fn double_value_units_to_integer_units<T: ReadableHistogram>(histogram: &T, valu
     if !units.is_finite() || units > u64::MAX as f64 {
         return Err(IterationError::InvalidBucketWidth);
     }
-    Ok((units as u64).max(1))
+    Ok(NonZeroU64::new(units as u64).unwrap_or(NonZeroU64::MIN))
 }

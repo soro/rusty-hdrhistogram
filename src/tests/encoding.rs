@@ -681,6 +681,55 @@ fn histogram_log_scanner_reports_java_timing_semantics_without_decoding() {
 
 #[cfg(feature = "encoding-base64")]
 #[test]
+fn histogram_log_raw_line_scanning_preserves_text_and_tracks_timing() {
+    let start = "#[StartTime: 100.123456 (seconds since epoch)]\r\n";
+    let base = "#[BaseTime: 100.123456 (seconds since epoch)]\n";
+    let blank = " \t\r\n";
+    let interval = "Tag=phase-a,0.123456,0.000001,1.234567,not-base64";
+    let log = format!("{start}{base}{blank}{interval}");
+    let mut scanner = HistogramLogScanner::new(Cursor::new(log));
+
+    let line = scanner.next_line().unwrap().unwrap();
+    assert_eq!(start, line.raw_line);
+    assert_eq!(Some(HistogramLogScannedRecord::StartTime(100.123456)), line.record);
+    // Mixing record-oriented and line-oriented reads shares one timing state.
+    assert_eq!(
+        Some(HistogramLogScannedRecord::BaseTime(100.123456)),
+        scanner.next_record().unwrap()
+    );
+    let line = scanner.next_line().unwrap().unwrap();
+    assert_eq!(blank, line.raw_line);
+    assert_eq!(None, line.record);
+    let line = scanner.next_line().unwrap().unwrap();
+    assert_eq!(interval, line.raw_line);
+    let Some(HistogramLogScannedRecord::Interval(record)) = line.record else {
+        panic!("expected interval metadata");
+    };
+    assert_eq!(0.123456, record.start_timestamp_sec);
+    assert_eq!(0.000001, record.interval_length_sec);
+    assert_eq!(1.234567, record.max_value);
+    assert!((record.relative_start_time_sec - 0.123456).abs() < 1e-12);
+    assert!((record.absolute_start_time_sec - 100.246912).abs() < 1e-12);
+    assert!(matches!(record.decode_histogram(), Err(DecodeError::Base64(_))));
+    assert!(scanner.next_line().unwrap().is_none());
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
+fn histogram_log_raw_line_scanning_still_validates_metadata() {
+    for log in [
+        "#[StartTime: NaN]\n",
+        "#[BaseTime: inf]\n",
+        "1,-1,0,unused\n",
+        "1e308,1e308,0,unused\n",
+    ] {
+        let mut scanner = HistogramLogScanner::new(Cursor::new(log));
+        assert!(matches!(scanner.next_line(), Err(DecodeError::InvalidLogLine(_))));
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
 fn histogram_log_report_generates_interval_and_percentile_outputs() {
     let mut first = Histogram::with_high_sigvdig(10_000, 2).unwrap();
     first.record_value_with_count(100, 3).unwrap();
@@ -921,6 +970,38 @@ fn histogram_log_report_applies_range_boundaries_to_interval_start() {
 
 #[cfg(feature = "encoding-base64")]
 #[test]
+fn histogram_log_report_stops_reading_at_first_interval_past_end() {
+    let mut histogram = Histogram::with_high_sigvdig(10_000, 2).unwrap();
+    histogram.record_value(100).unwrap();
+    histogram.meta_data.set_tag_string("phase-a".to_string());
+
+    let mut log = format!(
+        "{}{}{}{}",
+        histogram_log_start_time_line(10.0),
+        encode_histogram_log_line_with_max_value_unit_ratio(&histogram, 10.0, 11.0, 1.0).unwrap(),
+        encode_histogram_log_line_with_max_value_unit_ratio(&histogram, 11.0, 12.0, 1.0).unwrap(),
+        "Tag=other,12,1,0,not-base64\n",
+    );
+    let expected_position = log.len() as u64;
+    log.push_str("malformed discarded tail\n");
+    let mut reader = Cursor::new(log);
+    let config = HistogramLogReportConfig {
+        tag_filter: HistogramLogTagFilter::Tag("phase-a".to_string()),
+        range_start_time_sec: 1.0,
+        range_end_time_sec: 1.0,
+        ..HistogramLogReportConfig::default()
+    };
+
+    let report = generate_histogram_log_report_from_reader(&mut reader, &config).unwrap();
+    assert_eq!(1, report.processed_interval_count);
+    assert_eq!(vec![Some("phase-a".to_string())], report.tags);
+    // The stopping interval need not match the tag or have a decodable payload.
+    // In particular, no subsequent records or bytes are requested from the reader.
+    assert_eq!(expected_position, reader.position());
+}
+
+#[cfg(feature = "encoding-base64")]
+#[test]
 fn histogram_log_report_rejects_invalid_config() {
     let mut config = HistogramLogReportConfig {
         range_start_time_sec: 2.0,
@@ -934,15 +1015,6 @@ fn histogram_log_report_rejects_invalid_config() {
 
     config = HistogramLogReportConfig {
         output_value_unit_ratio: 0.0,
-        ..HistogramLogReportConfig::default()
-    };
-    assert!(matches!(
-        generate_histogram_log_report([""].iter().copied(), &config),
-        Err(DecodeError::InvalidLogLine(_))
-    ));
-
-    config = HistogramLogReportConfig {
-        percentile_ticks_per_half_distance: 0,
         ..HistogramLogReportConfig::default()
     };
     assert!(matches!(

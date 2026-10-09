@@ -6,6 +6,7 @@ use crate::iteration::{
 };
 use crate::st::Histogram;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::sync::OnceLock;
 
 fn highest_allowed_value_ever() -> f64 {
@@ -408,11 +409,12 @@ impl<P: OverflowPolicy> DoubleHistogramWithPolicy<P> {
         Ok(target)
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Histogram> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> DoublePercentileIterator<&'_ Histogram> {
         DoublePercentileIterator::new(&self.integer_histogram, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Histogram> {
+    /// Returns an error for an invalid width; see [`DoubleLinearIterator::new`].
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> Result<DoubleLinearIterator<&'_ Histogram>, IterationError> {
         DoubleLinearIterator::new(&self.integer_histogram, value_units_per_bucket)
     }
 

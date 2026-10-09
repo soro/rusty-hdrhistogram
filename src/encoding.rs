@@ -25,6 +25,8 @@ use std::fmt;
 use std::io::Read;
 #[cfg(feature = "encoding-base64")]
 use std::io::{BufRead, Cursor, Write};
+#[cfg(feature = "encoding-base64")]
+use std::num::NonZeroU32;
 
 const V0_ENCODING_COOKIE_BASE: u32 = 0x1c849308;
 const V0_COMPRESSED_ENCODING_COOKIE_BASE: u32 = 0x1c849309;
@@ -173,6 +175,17 @@ pub enum HistogramLogScannedRecord {
     Interval(HistogramLogScannedInterval),
 }
 
+/// A scanned log line together with its exact input text.
+///
+/// The raw line retains whitespace and its original line ending (if any).
+/// Blank lines have no record. Interval payloads are not decoded.
+#[cfg(feature = "encoding-base64")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistogramLogScannedLine {
+    pub raw_line: String,
+    pub record: Option<HistogramLogScannedRecord>,
+}
+
 #[cfg(feature = "encoding-base64")]
 pub struct HistogramLogEntry {
     pub tag: Option<String>,
@@ -208,10 +221,12 @@ pub enum HistogramLogTagFilter {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistogramLogReportConfig {
     pub tag_filter: HistogramLogTagFilter,
+    /// Inclusive lower bound on interval start times relative to the log start.
     pub range_start_time_sec: f64,
+    /// Inclusive upper bound. Ordered log processing stops at the first later interval.
     pub range_end_time_sec: f64,
     pub output_value_unit_ratio: f64,
-    pub percentile_ticks_per_half_distance: u32,
+    pub percentile_ticks_per_half_distance: NonZeroU32,
     pub csv: bool,
     pub moving_window: Option<HistogramLogMovingWindowConfig>,
     pub expected_interval_for_coordinated_omission_correction: f64,
@@ -232,6 +247,7 @@ pub struct HistogramLogReport {
     pub start_time_sec: f64,
     pub base_time_sec: f64,
     pub processed_interval_count: usize,
+    /// Tags seen before the end-time cutoff, including intervals excluded by other filters.
     pub tags: Vec<Option<String>>,
     pub interval_log: String,
     pub moving_window_log: Option<String>,
@@ -244,6 +260,7 @@ pub struct HistogramLogReportSummary {
     pub start_time_sec: f64,
     pub base_time_sec: f64,
     pub processed_interval_count: usize,
+    /// Tags seen before the end-time cutoff, including intervals excluded by other filters.
     pub tags: Vec<Option<String>>,
 }
 
@@ -316,13 +333,26 @@ impl Default for HistogramLogReportConfig {
             range_start_time_sec: 0.0,
             range_end_time_sec: f64::MAX,
             output_value_unit_ratio: DEFAULT_LOG_MAX_VALUE_UNIT_RATIO,
-            percentile_ticks_per_half_distance: 5,
+            percentile_ticks_per_half_distance: NonZeroU32::new(5).unwrap(),
             csv: false,
             moving_window: None,
             expected_interval_for_coordinated_omission_correction: 0.0,
             processor_time_range_headers: false,
             processor_start_time_header: false,
         }
+    }
+}
+
+#[cfg(feature = "encoding-base64")]
+impl HistogramLogReportConfig {
+    /// Validate report options before opening or truncating output files.
+    /// Report generation also validates the configuration automatically.
+    ///
+    /// # Errors
+    /// Returns [`DecodeError::InvalidLogLine`] for invalid ranges, scaling,
+    /// percentile, moving-window, or coordinated-omission settings.
+    pub fn validate(&self) -> Result<(), DecodeError> {
+        validate_report_config(self)
     }
 }
 
@@ -355,6 +385,8 @@ impl HistogramLogScannedInterval {
         decode_histogram_log_payload(&self.compressed_histogram_base64)
     }
 
+    /// Reformat this interval using Java's three-decimal metadata precision.
+    /// Use [`HistogramLogScanner::next_line`] for lossless pass-through filtering.
     pub fn log_line(&self) -> String {
         match self.tag.as_deref() {
             Some(tag) => format!(
@@ -402,11 +434,28 @@ impl<R: BufRead> HistogramLogScanner<R> {
     }
 
     pub fn next_record(&mut self) -> Result<Option<HistogramLogScannedRecord>, DecodeError> {
-        let Some(mut record) = self.read_next_scanned_record()? else {
+        while let Some(line) = self.next_line()? {
+            if let Some(record) = line.record {
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Read one line without changing its formatting, including blank lines.
+    ///
+    /// Parsed records use the same timestamp validation and relative/base-time
+    /// tracking as [`Self::next_record`]. Payloads remain encoded. `None` means EOF.
+    pub fn next_line(&mut self) -> Result<Option<HistogramLogScannedLine>, DecodeError> {
+        let mut raw_line = String::new();
+        if self.reader.read_line(&mut raw_line)? == 0 {
             return Ok(None);
-        };
-        self.observe_record(&mut record)?;
-        Ok(Some(record))
+        }
+        let mut record = scan_histogram_log_line(&raw_line)?;
+        if let Some(record) = record.as_mut() {
+            self.observe_record(record)?;
+        }
+        Ok(Some(HistogramLogScannedLine { raw_line, record }))
     }
 
     pub fn next_interval(&mut self) -> Result<Option<HistogramLogScannedInterval>, DecodeError> {
@@ -456,20 +505,6 @@ impl<R: BufRead> HistogramLogScanner<R> {
             return Ok(Some(interval));
         }
         Ok(None)
-    }
-
-    fn read_next_scanned_record(&mut self) -> Result<Option<HistogramLogScannedRecord>, DecodeError> {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let bytes = self.reader.read_line(&mut line)?;
-            if bytes == 0 {
-                return Ok(None);
-            }
-            if let Some(record) = scan_histogram_log_line(&line)? {
-                return Ok(Some(record));
-            }
-        }
     }
 
     fn observe_record(&mut self, record: &mut HistogramLogScannedRecord) -> Result<(), DecodeError> {
@@ -1373,6 +1408,7 @@ pub fn scan_histogram_log_line(line: &str) -> Result<Option<HistogramLogScannedR
 /// input files or report outputs, use [`write_histogram_log_report`] so callers
 /// can stream input from `BufRead` and stream report sections into `Write`
 /// destinations.
+/// Intervals must be ordered by start time, as for [`write_histogram_log_report`].
 ///
 /// ```ignore
 /// let config = HistogramLogReportConfig {
@@ -1419,6 +1455,8 @@ where
     })
 }
 
+/// Generate report strings from an ordered histogram log reader.
+/// See [`write_histogram_log_report`] for range and streaming semantics.
 #[cfg(feature = "encoding-base64")]
 pub fn generate_histogram_log_report_from_reader<R: BufRead>(
     reader: R,
@@ -1450,6 +1488,12 @@ pub fn generate_histogram_log_report_from_reader<R: BufRead>(
     })
 }
 
+/// Stream reports from a log ordered by interval start time.
+///
+/// The time range is inclusive and relative to the log start. Processing stops
+/// after reading the first interval whose start exceeds the end of the range,
+/// regardless of its tag. That interval's payload is not decoded, and later
+/// records are not read. This matches Java's bounded log processing.
 #[cfg(feature = "encoding-base64")]
 pub fn write_histogram_log_report<R, WI, WP, WM>(
     reader: R,
@@ -1464,7 +1508,7 @@ where
     WP: Write,
     WM: Write,
 {
-    validate_report_config(config)?;
+    config.validate()?;
     if config.moving_window.is_some() && moving_window_log.is_none() {
         return Err(DecodeError::InvalidLogLine(
             "moving-window report requested without a moving-window writer".to_string(),
@@ -1494,12 +1538,12 @@ where
     let mut processor_start_time_written = false;
 
     while let Some(interval) = scanner.next_interval()? {
+        if interval.relative_start_time_sec > config.range_end_time_sec {
+            break;
+        }
         tags.insert(interval.tag.clone());
 
-        if interval.relative_start_time_sec < config.range_start_time_sec
-            || interval.relative_start_time_sec > config.range_end_time_sec
-            || !config.tag_filter.matches(interval.tag.as_deref())
-        {
+        if interval.relative_start_time_sec < config.range_start_time_sec || !config.tag_filter.matches(interval.tag.as_deref()) {
             continue;
         }
 
@@ -1886,11 +1930,6 @@ fn validate_report_config(config: &HistogramLogReportConfig) -> Result<(), Decod
             "output value unit ratio must be finite and positive".to_string(),
         ));
     }
-    if config.percentile_ticks_per_half_distance == 0 {
-        return Err(DecodeError::InvalidLogLine(
-            "percentile ticks per half distance must be greater than zero".to_string(),
-        ));
-    }
     if !config.expected_interval_for_coordinated_omission_correction.is_finite()
         || config.expected_interval_for_coordinated_omission_correction < 0.0
     {
@@ -2085,7 +2124,7 @@ fn moving_window_report_line(
 #[cfg(feature = "encoding-base64")]
 fn percentile_distribution_report(
     histogram: &DecodedHistogram,
-    percentile_ticks_per_half_distance: u32,
+    percentile_ticks_per_half_distance: NonZeroU32,
     output_value_unit_ratio: f64,
     csv: bool,
 ) -> String {
@@ -2105,7 +2144,7 @@ fn percentile_distribution_report(
 fn write_percentile_distribution_report<W: Write>(
     output: &mut W,
     histogram: &DecodedHistogram,
-    percentile_ticks_per_half_distance: u32,
+    percentile_ticks_per_half_distance: NonZeroU32,
     output_value_unit_ratio: f64,
     csv: bool,
 ) -> Result<(), DecodeError> {

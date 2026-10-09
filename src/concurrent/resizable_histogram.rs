@@ -9,6 +9,7 @@ use crate::iteration::{
     AllValuesIterator, IterationError, LinearIterator, LogarithmicIterator, PercentileIterator, RecordedValuesIterator,
 };
 use crossbeam_epoch as epoch;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::ptr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -1149,18 +1150,18 @@ impl ResizableStructuralMutation<'_> {
 }
 
 impl ResizableConcurrentReadView<'_> {
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<&'_ Self> {
         PercentileIterator::from_readable(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+    pub fn linear_bucket_values(&self, value_units_per_bucket: NonZeroU64) -> LinearIterator<&'_ Self> {
         LinearIterator::from_readable(self, value_units_per_bucket)
     }
 
     /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
     pub fn logarithmic_bucket_values(
         &self,
-        value_units_in_first_bucket: u64,
+        value_units_in_first_bucket: NonZeroU64,
         log_base: f64,
     ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::from_readable(self, value_units_in_first_bucket, log_base)

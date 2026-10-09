@@ -1,5 +1,6 @@
 use crate::tests::util::*;
 use crate::IterationError;
+use std::num::{NonZeroU32, NonZeroU64};
 
 // The same errors must protect ordinary histograms, frozen snapshots,
 // and captured live views, including reset before any state is changed.
@@ -24,17 +25,8 @@ macro_rules! check_logarithmic_parameters {
 
 #[test]
 fn logarithmic_parameters_are_validated_at_construction_and_reset() {
-    let invalid = [
-        (0, 2.0, IterationError::InvalidBucketWidth),
-        (1, f64::NAN, IterationError::InvalidLogBase),
-        (1, f64::INFINITY, IterationError::InvalidLogBase),
-        (1, f64::NEG_INFINITY, IterationError::InvalidLogBase),
-        (1, -1.0, IterationError::InvalidLogBase),
-        (1, -0.0, IterationError::InvalidLogBase),
-        (1, 0.0, IterationError::InvalidLogBase),
-        (1, 0.5, IterationError::InvalidLogBase),
-        (1, 1.0, IterationError::InvalidLogBase),
-    ];
+    let invalid = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, -0.0, 0.0, 0.5, 1.0]
+        .map(|base| (NonZeroU64::MIN, base, IterationError::InvalidLogBase));
     let mut histogram = crate::Histogram::builder().significant_digits(0).build().unwrap();
     let mut concurrent = crate::concurrent::ResizableConcurrentHistogram::builder()
         .significant_digits(0)
@@ -44,9 +36,57 @@ fn logarithmic_parameters_are_validated_at_construction_and_reset() {
         histogram.record_value(value).unwrap();
         concurrent.record_value(value).unwrap();
     }
-    check_logarithmic_parameters!(histogram, 1, invalid);
-    check_logarithmic_parameters!(concurrent.as_snapshot(), 1, invalid);
-    check_logarithmic_parameters!(concurrent.read_view(), 1, invalid);
+    check_logarithmic_parameters!(histogram, NonZeroU64::MIN, invalid);
+    check_logarithmic_parameters!(concurrent.as_snapshot(), NonZeroU64::MIN, invalid);
+    check_logarithmic_parameters!(concurrent.read_view(), NonZeroU64::MIN, invalid);
+}
+
+macro_rules! check_double_linear_parameters {
+    ($histogram:expr) => {{
+        let histogram = &$histogram;
+        let mut reference = histogram.linear_bucket_values(1.0).unwrap();
+        let first = reference.try_next().unwrap();
+        let second = reference.try_next().unwrap();
+        assert!(first.is_some() && second.is_some());
+        for width in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            assert_eq!(
+                Some(IterationError::InvalidBucketWidth),
+                histogram.linear_bucket_values(width).err()
+            );
+            let mut iterator = histogram.linear_bucket_values(1.0).unwrap();
+            assert_eq!(first, iterator.try_next().unwrap());
+            assert_eq!(Err(IterationError::InvalidBucketWidth), iterator.reset(width));
+            assert_eq!(second, iterator.try_next().unwrap());
+            iterator.reset(1.0).unwrap();
+            assert_eq!(first, iterator.try_next().unwrap());
+        }
+        // A positive sub-unit width retains the existing round-up-to-one behavior.
+        assert!(histogram
+            .linear_bucket_values(f64::from_bits(1))
+            .unwrap()
+            .try_next()
+            .unwrap()
+            .is_some());
+    }};
+}
+
+#[test]
+fn double_linear_parameters_are_validated_at_construction_and_reset() {
+    let mut histogram = crate::DoubleHistogram::builder().significant_digits(0).build().unwrap();
+    let concurrent = crate::concurrent::ConcurrentDoubleHistogram::builder()
+        .significant_digits(0)
+        .build()
+        .unwrap();
+    for value in [0.0, 4.0, 16.0] {
+        histogram.record_value(value).unwrap();
+        concurrent.record_value(value).unwrap();
+    }
+    check_double_linear_parameters!(histogram);
+    check_double_linear_parameters!(concurrent.read_view());
+    let recorder = crate::DoubleRecorder::from_histogram(concurrent);
+    let sample = recorder.begin_interval_sample();
+    check_double_linear_parameters!(sample);
+    check_double_linear_parameters!(sample.snapshot());
 }
 
 #[test]
@@ -77,10 +117,26 @@ fn double_logarithmic_parameters_are_validated_at_construction_and_reset() {
 #[test]
 fn percentiles() {
     let histogram = stat_histo();
-    for value in histogram.percentiles(5) {
+    for value in histogram.percentiles(NonZeroU32::new(5).unwrap()) {
         let value_at_pctl = histogram.get_value_at_percentile(value.percentile);
         assert_eq!(value.value_iterated_to, histogram.highest_equivalent_value(value_at_pctl));
     }
+}
+
+#[test]
+fn percentile_tick_counts_retain_the_full_unsigned_range() {
+    let mut histogram = crate::Histogram::builder().build().unwrap();
+    histogram.record_value(1).unwrap();
+    histogram.record_value(2).unwrap();
+    let ticks = NonZeroU32::new(u32::MAX).unwrap();
+    let mut iterator = histogram.percentiles(ticks);
+    assert_eq!(0.0, iterator.next().unwrap().percentile_level_iterated_to);
+    assert_eq!(
+        100.0 / (2 * u64::from(u32::MAX)) as f64,
+        iterator.next().unwrap().percentile_level_iterated_to
+    );
+    iterator.reset(NonZeroU32::MIN);
+    assert_eq!(2, iterator.last().unwrap().total_count_to_this_value);
 }
 
 #[test]
@@ -89,7 +145,7 @@ fn linear_bucket_values() {
     let histogram = stat_histo();
     let raw_histogram = raw_stat_histo();
 
-    for value in raw_histogram.linear_bucket_values(100000) {
+    for value in raw_histogram.linear_bucket_values(NonZeroU64::new(100000).unwrap()) {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(
@@ -112,7 +168,7 @@ fn linear_bucket_values() {
     index = 0;
     let mut total_added_counts = 0;
 
-    for value in histogram.linear_bucket_values(10000) {
+    for value in histogram.linear_bucket_values(NonZeroU64::new(10000).unwrap()) {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(
@@ -134,7 +190,7 @@ fn linear_bucket_values() {
     index = 0;
     total_added_counts = 0;
 
-    for value in histogram.linear_bucket_values(1000) {
+    for value in histogram.linear_bucket_values(NonZeroU64::new(1000).unwrap()) {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 1 {
             assert_eq!(
@@ -161,7 +217,10 @@ fn logarithmic_bucket_values() {
 
     let mut index = 0;
 
-    for value in raw_histogram.logarithmic_bucket_values(10000, 2.0).unwrap() {
+    for value in raw_histogram
+        .logarithmic_bucket_values(NonZeroU64::new(10000).unwrap(), 2.0)
+        .unwrap()
+    {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(
@@ -187,7 +246,7 @@ fn logarithmic_bucket_values() {
     index = 0;
     let mut total_added_counts = 0;
 
-    for value in histogram.logarithmic_bucket_values(10000, 2.0).unwrap() {
+    for value in histogram.logarithmic_bucket_values(NonZeroU64::new(10000).unwrap(), 2.0).unwrap() {
         let count_added_in_this_bucket = value.count_added_in_this_iteration_step;
         if index == 0 {
             assert_eq!(

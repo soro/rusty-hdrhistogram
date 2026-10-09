@@ -3,6 +3,7 @@ use crate::concurrent::resizable_histogram::ResizableConcurrentHistogram;
 use crate::concurrent::static_histogram::FixedConcurrentHistogram;
 use crate::core::{EncodableHistogram, HistogramMetaData, HistogramSettings, IterableHistogram, ReadableHistogram};
 use crate::iteration::*;
+use std::num::{NonZeroU32, NonZeroU64};
 
 pub(crate) struct Snapshot<'a, T: 'a + RecordableHistogram>(&'a T);
 
@@ -14,17 +15,17 @@ impl<'a, T: RecordableHistogram> Snapshot<'a, T> {
         Snapshot(histogram)
     }
 
-    pub(crate) fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+    pub(crate) fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<&'_ Self> {
         PercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub(crate) fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+    pub(crate) fn linear_bucket_values(&self, value_units_per_bucket: NonZeroU64) -> LinearIterator<&'_ Self> {
         LinearIterator::new(self, value_units_per_bucket)
     }
 
     pub(crate) fn logarithmic_bucket_values(
         &self,
-        value_units_in_first_bucket: u64,
+        value_units_in_first_bucket: NonZeroU64,
         log_base: f64,
     ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
         LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)
@@ -116,18 +117,18 @@ macro_rules! impl_snapshot_wrapper {
                 $snapshot(snapshot)
             }
 
-            pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> PercentileIterator<&'_ Self> {
+            pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> PercentileIterator<&'_ Self> {
                 PercentileIterator::new(self, percentile_ticks_per_half_distance)
             }
 
-            pub fn linear_bucket_values(&self, value_units_per_bucket: u64) -> LinearIterator<&'_ Self> {
+            pub fn linear_bucket_values(&self, value_units_per_bucket: NonZeroU64) -> LinearIterator<&'_ Self> {
                 LinearIterator::new(self, value_units_per_bucket)
             }
 
             /// Returns an error for invalid bucket parameters; see [`LogarithmicIterator::new`].
             pub fn logarithmic_bucket_values(
                 &self,
-                value_units_in_first_bucket: u64,
+                value_units_in_first_bucket: NonZeroU64,
                 log_base: f64,
             ) -> Result<LogarithmicIterator<&'_ Self>, IterationError> {
                 LogarithmicIterator::new(self, value_units_in_first_bucket, log_base)

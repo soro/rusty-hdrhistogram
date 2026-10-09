@@ -7,8 +7,19 @@ use loom_model::{arc, atomic_bool, atomic_usize, drop_guard, run_model, spawn, M
 
 #[test]
 fn flip_observes_writer_publication() {
-    run_model(|| {
-        let phaser = arc(ModelPhaser::new());
+    check_flip_observes_writer_publication(0, false);
+}
+
+#[test]
+fn flip_observes_writer_publication_past_the_32_bit_boundary() {
+    for odd_phase in [false, true] {
+        check_flip_observes_writer_publication(i32::MAX as u32, odd_phase);
+    }
+}
+
+fn check_flip_observes_writer_publication(completed_writes: u32, odd_phase: bool) {
+    run_model(move || {
+        let phaser = arc(ModelPhaser::with_completed_writes(completed_writes, odd_phase));
         let payload = arc(atomic_usize(0));
         let writer_started = arc(atomic_bool(false));
 

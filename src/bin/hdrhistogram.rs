@@ -1,8 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use hdrhistogram::encoding::{
-    histogram_log_base_time_line, histogram_log_legend_line, histogram_log_start_time_line, write_histogram_log_report,
-    HistogramLogMovingWindowConfig, HistogramLogReportConfig, HistogramLogScannedRecord, HistogramLogScanner, HistogramLogTagFilter,
-    DEFAULT_LOG_MAX_VALUE_UNIT_RATIO,
+    write_histogram_log_report, HistogramLogMovingWindowConfig, HistogramLogReportConfig, HistogramLogScannedRecord, HistogramLogScanner,
+    HistogramLogTagFilter, DEFAULT_LOG_MAX_VALUE_UNIT_RATIO,
 };
 use std::collections::BTreeSet;
 use std::env;
@@ -10,6 +9,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -81,9 +81,9 @@ struct ProcessArgs {
     #[arg(
         long = "percentiles-output-ticks-per-half",
         alias = "percentilesOutputTicksPerHalf",
-        default_value_t = 5
+        default_value_t = NonZeroU32::new(5).unwrap()
     )]
-    percentiles_output_ticks_per_half: u32,
+    percentiles_output_ticks_per_half: NonZeroU32,
     #[arg(
         long = "correct-log-with-known-coordinated-omission",
         alias = "correctLogWithKnownCoordinatedOmission",
@@ -210,6 +210,7 @@ fn process_log(args: ProcessArgs) -> CliResult<()> {
         processor_time_range_headers: output_to_files,
         processor_start_time_header: true,
     };
+    config.validate()?;
 
     if let Some(output_prefix) = output_prefix {
         let percentile_path = suffixed_path(&output_prefix, "hgrm");
@@ -396,18 +397,13 @@ fn filter(args: FilterArgs) -> CliResult<()> {
         &mut stdout_lock
     };
 
-    while let Some(record) = scanner.next_record()? {
-        match record {
-            HistogramLogScannedRecord::StartTime(value) => out.write_all(histogram_log_start_time_line(value).as_bytes())?,
-            HistogramLogScannedRecord::BaseTime(value) => out.write_all(histogram_log_base_time_line(value).as_bytes())?,
-            HistogramLogScannedRecord::Comment(comment) => writeln!(out, "#{}", comment)?,
-            HistogramLogScannedRecord::Legend => out.write_all(histogram_log_legend_line().as_bytes())?,
-            HistogramLogScannedRecord::Interval(interval) => {
-                if interval_matches(&interval, &filter, args.filter.start, end) {
-                    out.write_all(interval.log_line().as_bytes())?;
-                }
+    while let Some(line) = scanner.next_line()? {
+        if let Some(HistogramLogScannedRecord::Interval(interval)) = line.record.as_ref() {
+            if !interval_matches(interval, &filter, args.filter.start, end) {
+                continue;
             }
         }
+        out.write_all(line.raw_line.as_bytes())?;
     }
     out.flush()?;
     Ok(())

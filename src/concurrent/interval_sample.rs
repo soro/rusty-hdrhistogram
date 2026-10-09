@@ -12,6 +12,7 @@ use crate::iteration::{
 };
 use crate::st::{DoubleHistogramWithPolicy, Histogram};
 use std::mem;
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 pub(crate) struct IntervalSampleCore<'a, 'b: 'a, T: 'a + RecordableHistogram> {
@@ -154,11 +155,15 @@ impl<'a, 'b: 'a, P: OverflowPolicy> DoubleIntervalSample<'a, 'b, P> {
         unsafe { ConcurrentDoubleSnapshot::new(self.raw_histogram()) }
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<ConcurrentDoubleSnapshot<'_, P>> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> DoublePercentileIterator<ConcurrentDoubleSnapshot<'_, P>> {
         DoublePercentileIterator::new(self.snapshot(), percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<ConcurrentDoubleSnapshot<'_, P>> {
+    /// Returns an error for an invalid width; see [`DoubleLinearIterator::new`].
+    pub fn linear_bucket_values(
+        &self,
+        value_units_per_bucket: f64,
+    ) -> Result<DoubleLinearIterator<ConcurrentDoubleSnapshot<'_, P>>, IterationError> {
         DoubleLinearIterator::new(self.snapshot(), value_units_per_bucket)
     }
 

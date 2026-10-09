@@ -610,7 +610,7 @@ fn percentile_iter(c: &mut Criterion) {
             histogram.record_value(value).unwrap();
         }
 
-        let percentile_ticks_per_half_distance = 1000;
+        let percentile_ticks_per_half_distance = std::num::NonZeroU32::new(1000).unwrap();
         b.iter(|| {
             for _ in 1..30 {
                 black_box(histogram.percentiles(percentile_ticks_per_half_distance).last());

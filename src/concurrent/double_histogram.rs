@@ -9,10 +9,11 @@ use crate::core::{
 };
 use crate::iteration::{
     DoubleAllValuesIterator, DoubleLinearIterator, DoubleLogarithmicIterator, DoublePercentileIterator, DoubleRecordedValuesIterator,
-    RecordedValuesIterator,
+    IterationError, RecordedValuesIterator,
 };
 use parking_lot::Mutex;
 use std::marker::PhantomData;
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -232,11 +233,12 @@ impl ConcurrentDoubleReadView<'_> {
             .map(|std_deviation| std_deviation * self.integer_to_double_value_conversion_ratio())
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Self> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> DoublePercentileIterator<&'_ Self> {
         DoublePercentileIterator::from_readable(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Self> {
+    /// Returns an error for an invalid width; see [`DoubleLinearIterator::new`].
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> Result<DoubleLinearIterator<&'_ Self>, IterationError> {
         DoubleLinearIterator::from_readable(self, value_units_per_bucket)
     }
 
@@ -430,11 +432,12 @@ impl<'a, P: OverflowPolicy> ConcurrentDoubleSnapshot<'a, P> {
         self.auto_resize
     }
 
-    pub fn percentiles(&self, percentile_ticks_per_half_distance: u32) -> DoublePercentileIterator<&'_ Self> {
+    pub fn percentiles(&self, percentile_ticks_per_half_distance: NonZeroU32) -> DoublePercentileIterator<&'_ Self> {
         DoublePercentileIterator::new(self, percentile_ticks_per_half_distance)
     }
 
-    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> DoubleLinearIterator<&'_ Self> {
+    /// Returns an error for an invalid width; see [`DoubleLinearIterator::new`].
+    pub fn linear_bucket_values(&self, value_units_per_bucket: f64) -> Result<DoubleLinearIterator<&'_ Self>, IterationError> {
         DoubleLinearIterator::new(self, value_units_per_bucket)
     }
 

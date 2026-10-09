@@ -16,23 +16,25 @@
 
 use parking_lot::{Mutex, MutexGuard};
 use std::mem;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::thread;
 use std::time::Duration;
 
 // Struct holding all the bookkeeping variables for the phaser
 pub struct WriterReaderPhaser {
-    start_epoch: AtomicIsize,
-    even_end_epoch: AtomicIsize,
-    odd_end_epoch: AtomicIsize,
+    // The sign identifies the phase. Keep Java's 64-bit epochs even on 32-bit
+    // targets so ordinary recording cannot reach a phase rollover at 2^31 writes.
+    start_epoch: AtomicI64,
+    even_end_epoch: AtomicI64,
+    odd_end_epoch: AtomicI64,
     reader_lock: Mutex<()>,
 }
 
 impl WriterReaderPhaser {
     pub fn new() -> WriterReaderPhaser {
-        let start = AtomicIsize::new(0);
-        let even_end = AtomicIsize::new(0);
-        let odd_end = AtomicIsize::new(isize::MIN);
+        let start = AtomicI64::new(0);
+        let even_end = AtomicI64::new(0);
+        let odd_end = AtomicI64::new(i64::MIN);
 
         WriterReaderPhaser {
             start_epoch: start,
@@ -66,7 +68,7 @@ impl WriterReaderPhaser {
 }
 
 pub struct WriterCriticalSectionGuard<'a> {
-    epoch: &'a AtomicIsize,
+    epoch: &'a AtomicI64,
 }
 
 impl<'a> WriterCriticalSectionGuard<'a> {
@@ -93,7 +95,7 @@ impl<'a> PhaseFlipGuard<'a> {
     pub fn flip_with_yield_time(&self, yield_time: Duration) {
         let next_phase_is_even = self.parent.start_epoch.load(Ordering::SeqCst) < 0;
 
-        let initial_start_value = if next_phase_is_even { 0 } else { isize::MIN };
+        let initial_start_value = if next_phase_is_even { 0 } else { i64::MIN };
         if next_phase_is_even {
             self.parent.even_end_epoch.store(initial_start_value, Ordering::Relaxed);
         } else {
@@ -126,5 +128,36 @@ impl<'a> PhaseFlipGuard<'a> {
 
     pub fn reader_unlock(self) {
         mem::drop(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epochs_keep_their_phase_past_the_32_bit_boundary() {
+        for odd_phase in [false, true] {
+            let initial_epoch = if odd_phase { i64::MIN } else { 0 };
+            let completed_epoch = initial_epoch + i64::from(i32::MAX);
+            // Seed completed entries instead of recording billions of writes.
+            let phaser = WriterReaderPhaser {
+                start_epoch: AtomicI64::new(completed_epoch),
+                even_end_epoch: AtomicI64::new(if odd_phase { 0 } else { completed_epoch }),
+                odd_end_epoch: AtomicI64::new(if odd_phase { completed_epoch } else { i64::MIN }),
+                reader_lock: Mutex::new(()),
+            };
+            let end_epoch = if odd_phase { &phaser.odd_end_epoch } else { &phaser.even_end_epoch };
+            let writer = phaser.begin_writer_critical_section();
+            assert!(std::ptr::eq(writer.epoch, end_epoch));
+            assert_eq!(completed_epoch + 1, phaser.start_epoch.load(Ordering::Relaxed));
+            assert_eq!(odd_phase, phaser.start_epoch.load(Ordering::Relaxed) < 0);
+            assert_eq!(completed_epoch, end_epoch.load(Ordering::Relaxed));
+
+            drop(writer);
+            assert_eq!(completed_epoch + 1, end_epoch.load(Ordering::Relaxed));
+            phaser.reader_lock().flip();
+            assert_eq!(if odd_phase { 0 } else { i64::MIN }, phaser.start_epoch.load(Ordering::Relaxed));
+        }
     }
 }

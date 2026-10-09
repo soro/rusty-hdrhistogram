@@ -105,7 +105,8 @@ dynamic range, or auto-resize behavior.
 
 For concurrent writers, prefer recorders over direct concurrent histogram use.
 Writers record through a lock-free phaser path, while one reader periodically
-begins an interval sample.
+begins an interval sample. Phaser epochs are 64-bit on all supported targets,
+matching Java and avoiding phase rollover after `2^31` writes on 32-bit systems.
 
 ```rust
 use hdrhistogram::ResizableRecorder;
@@ -309,16 +310,30 @@ Java-style `HistogramLogProcessor` arguments are also accepted at the top level:
 cargo run --features cli --bin hdrhistogram -- -csv -i latency.hlog -o latency -outputValueUnitRatio 1000000
 ```
 
-File outputs are flushed before reporting success. The CLI rejects existing
+File outputs are flushed before reporting success. Report configuration is
+validated before output files are created or truncated. The CLI rejects existing
 output files that alias the input or another report output (including symlinks
 and hard links); in-place log processing is not supported. This preflight check
 does not protect against another process replacing paths during the command.
+
+Report processing expects intervals ordered by start time. The requested time
+range is inclusive; processing stops at the first interval starting after its
+end, even if that interval has a different tag. Later records are not read or
+validated, matching Java's bounded log processing.
+
+`log filter` copies retained lines verbatim, including high-precision numeric
+metadata, headers, comments, whitespace, and original line endings. It scans
+metadata for selection without decoding or re-encoding histogram payloads.
 
 ## Java Compatibility Notes
 
 The V2 binary encoding and histogram-log formats are intended to be compatible
 with Java HdrHistogram. A few edge semantics are worth calling out explicitly:
 
+- Normal log writers retain Java's three-decimal formatting for timestamps,
+  durations, and maximum-value metadata. Unlike rewriting through Java's log
+  writer, `log filter` preserves the source text and does not round sub-millisecond
+  intervals to zero duration.
 - Rust histograms use exact integer power-of-two layout math for
   `lowest_discernible_value`. Java HdrHistogram computes the same internal unit
   magnitude through floating-point logarithms, which can round very large
@@ -463,23 +478,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 Direct live concurrent histograms intentionally do not expose infallible scan
 iterators. Take a recorder sample or captured read view first.
 
-Logarithmic iterators require a positive first bucket width and a finite base
-strictly greater than `1`. Double bucket widths must also be finite and their
-converted integer width must fit. `logarithmic_bucket_values()`, iterator
-construction, and `reset()` return `Result<_, IterationError>` with
-`InvalidBucketWidth` or `InvalidLogBase` for invalid parameters. An invalid reset
-leaves the iterator unchanged. Validation adds no per-step iteration checks and
-does not affect recording. Reporters can propagate errors with `?` or skip a
-report without panicking:
+Integer linear bucket widths and logarithmic first-bucket widths use
+`std::num::NonZeroU64`. Percentile ticks per half-distance use `NonZeroU32`,
+including in report configuration. These requirements apply to histogram
+helpers, iterator constructors, and `reset()` across snapshots and read views.
+Validate dynamic configuration once with `NonZeroU64::try_from(width)?` or
+`NonZeroU32::try_from(ticks)?`; zero cannot then reach the iterator. Counts,
+correction intervals, and shift amounts retain their existing zero semantics.
+
+Logarithmic bases must be finite and strictly greater than `1`. Double bucket
+widths must be finite and positive, and fit after conversion to integer units;
+positive sub-unit widths round up to one. Integer logarithmic iterators and
+double linear/logarithmic iterators return `Result<_, IterationError>` from
+construction and reset. Invalid parameters return `InvalidBucketWidth` or
+`InvalidLogBase`, and an invalid reset leaves the iterator unchanged. Validation
+adds no per-step iteration checks and does not affect recording. For example:
 
 ```rust
-# use hdrhistogram::Histogram;
-# let histogram = Histogram::builder().build().unwrap();
-if let Ok(values) = histogram.logarithmic_bucket_values(1, 2.0) {
+use hdrhistogram::Histogram;
+use std::num::{NonZeroU32, NonZeroU64};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let histogram = Histogram::builder().build()?;
+    let width = NonZeroU64::try_from(10_u64)?;
+    let ticks = NonZeroU32::try_from(5_u32)?;
+    let _linear = histogram.linear_bucket_values(width);
+    let _percentiles = histogram.percentiles(ticks);
+    let values = histogram.logarithmic_bucket_values(width, 2.0)?;
     for value in values {
         // Export this bucket.
         let _count = value.count_added_in_this_iteration_step;
     }
+    Ok(())
 }
 ```
 

@@ -3,6 +3,7 @@ use hdrhistogram::{
     DoubleHistogram, DoubleRecorder, SaturatingDoubleHistogram, SaturatingDoubleRecorder, SaturatingSingleWriterDoubleRecorder,
     SingleWriterDoubleRecorder,
 };
+use std::num::{NonZeroU32, NonZeroU64};
 
 #[test]
 fn public_capability_traits_support_generic_iteration_and_encoding() {
@@ -30,7 +31,7 @@ fn logarithmic_reporting_can_propagate_parameter_errors() {
     use hdrhistogram::iteration::{DoubleLogarithmicIterator, IterableHistogram, LogarithmicIterator};
     use hdrhistogram::{Histogram, IterationError};
 
-    fn count_buckets<H: IterableHistogram>(histogram: &H, width: u64, base: f64) -> Result<u64, IterationError> {
+    fn count_buckets<H: IterableHistogram>(histogram: &H, width: NonZeroU64, base: f64) -> Result<u64, IterationError> {
         let mut values = LogarithmicIterator::new(histogram, width, base)?;
         values.reset(width, base)?;
         Ok(values.map(|value| value.count_added_in_this_iteration_step).sum())
@@ -38,10 +39,10 @@ fn logarithmic_reporting_can_propagate_parameter_errors() {
 
     let mut histogram = Histogram::builder().build().unwrap();
     // Even an empty reporter rejects invalid parameters without unwinding.
-    assert_eq!(Err(IterationError::InvalidBucketWidth), count_buckets(&histogram, 0, 2.0));
-    assert_eq!(Err(IterationError::InvalidLogBase), count_buckets(&histogram, 1, 1.0));
+    assert!(NonZeroU64::try_from(0).is_err());
+    assert_eq!(Err(IterationError::InvalidLogBase), count_buckets(&histogram, NonZeroU64::MIN, 1.0));
     histogram.record_value_with_count(42, 3).unwrap();
-    assert_eq!(Ok(3), count_buckets(&histogram, 1, 1.5));
+    assert_eq!(Ok(3), count_buckets(&histogram, NonZeroU64::MIN, 1.5));
 
     assert_eq!(
         Some(IterationError::InvalidBucketWidth),
@@ -66,6 +67,53 @@ fn logarithmic_reporting_can_propagate_parameter_errors() {
             .map(|value| value.count_added_in_this_iteration_step)
             .sum::<u64>()
     );
+}
+
+#[test]
+fn nonzero_reporting_arguments_work_through_public_histograms_and_samples() {
+    fn check<H: hdrhistogram::iteration::IterableHistogram>(histogram: &H) {
+        use hdrhistogram::iteration::{LinearIterator, PercentileIterator};
+        let width = NonZeroU64::try_from(2).unwrap();
+        let mut linear = LinearIterator::new(histogram, width);
+        let first = linear.next();
+        linear.reset(width);
+        assert_eq!(first, linear.next());
+        linear.reset(NonZeroU64::MIN);
+        assert_eq!(3, linear.map(|bucket| bucket.count_added_in_this_iteration_step).sum::<u64>());
+
+        let mut percentiles = PercentileIterator::new(histogram, NonZeroU32::MIN);
+        percentiles.reset(NonZeroU32::new(5).unwrap());
+        assert_eq!(3, percentiles.last().unwrap().total_count_to_this_value);
+    }
+
+    hdrhistogram::static_histogram! {
+        type SmallHistogram = {
+            lowest_discernible_value: 1,
+            highest_trackable_value: 1024,
+            significant_digits: 0,
+        };
+    }
+    let mut fixed = SmallHistogram::new();
+    fixed.record_value_with_count(16, 3).unwrap();
+    check(&fixed);
+    assert_eq!(3, fixed.percentiles(NonZeroU32::MIN).last().unwrap().total_count_to_this_value);
+
+    let recorder = hdrhistogram::ResizableRecorder::builder().build().unwrap();
+    recorder.record_value_with_count(16, 3).unwrap();
+    let sample = recorder.begin_interval_sample();
+    let snapshot = sample.snapshot();
+    check(&snapshot);
+    assert_eq!(3, snapshot.percentiles(NonZeroU32::MIN).last().unwrap().total_count_to_this_value);
+
+    let mut doubles = DoubleHistogram::new();
+    assert_eq!(
+        Some(hdrhistogram::IterationError::InvalidBucketWidth),
+        doubles.linear_bucket_values(0.0).err()
+    );
+    doubles.record_value(16.0).unwrap();
+    let mut linear = doubles.linear_bucket_values(2.0).unwrap();
+    linear.reset(1.0).unwrap();
+    assert_eq!(1, linear.map(|bucket| bucket.count_added_in_this_iteration_step).sum::<u64>());
 }
 
 #[test]

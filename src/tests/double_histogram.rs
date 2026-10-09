@@ -997,6 +997,7 @@ macro_rules! assert_double_iterator_surface {
 
         let linear_total = $histogram
             .linear_bucket_values(1.0)
+            .unwrap()
             .map(|value| value.count_added_in_this_iteration_step)
             .sum::<u64>();
         assert_eq!(3, linear_total);
@@ -1008,7 +1009,7 @@ macro_rules! assert_double_iterator_surface {
             .sum::<u64>();
         assert_eq!(3, logarithmic_total);
 
-        let percentile_last = $histogram.percentiles(5).last().unwrap();
+        let percentile_last = $histogram.percentiles(std::num::NonZeroU32::new(5).unwrap()).last().unwrap();
         assert_eq!(3, percentile_last.total_count_to_this_value);
         assert!($histogram.values_are_equivalent(10.0, percentile_last.value_iterated_to));
 

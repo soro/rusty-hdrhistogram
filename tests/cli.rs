@@ -142,6 +142,43 @@ fn filter_command_scans_without_decoding_payloads() {
 }
 
 #[test]
+fn filter_preserves_original_metadata_precision_and_formatting() {
+    let headers = concat!(
+        "  #[StartTime: 100.123456 (seconds since epoch), original date text]  \r\n",
+        "#[BaseTime: 100.123456 (seconds since epoch)]\n",
+        "\t# original comment α  \r\n",
+        " \t\r\n",
+        "\"StartTimestamp\",\"Interval_Length\",\"Interval_Max\",\"Interval_Compressed_Histogram\"\r\n",
+    );
+    let first = "  Tag=keep,0.123456,0.000001,1.234567,not-base64  \r\n";
+    let discarded = "Tag=drop,0.200001,0.0000001,1e-12,also-not-base64\n";
+    let last = "Tag=keep,0.300002,0.000001,1.234567,opaque-without-final-newline";
+    let log = format!("{headers}{first}{discarded}{last}");
+
+    for (args, expected) in [
+        (vec!["log", "filter", "--all-tags"], log.clone()),
+        (vec!["log", "filter", "--tag", "keep"], format!("{headers}{first}{last}")),
+        (
+            vec!["log", "filter", "--tag", "keep", "--start", "0.1234", "--end", "0.124"],
+            format!("{headers}{first}"),
+        ),
+    ] {
+        let output = run_with_stdin(&args, &log);
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(expected.as_bytes(), output.stdout);
+    }
+}
+
+#[test]
+fn filter_preserves_blank_lines_even_without_records() {
+    for log in ["", "\r\n\n \t", "# only a comment, no final newline"] {
+        let output = run_with_stdin(&["log", "filter"], log);
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(log.as_bytes(), output.stdout);
+    }
+}
+
+#[test]
 fn file_commands_reject_input_as_output_without_truncating_it() {
     let log = sample_log();
     for command in ["filter", "process"] {
@@ -192,6 +229,60 @@ fn process_checks_all_report_paths_before_creating_any_output() {
         let other_suffix = if suffix == "hgrm" { "mwp" } else { "hgrm" };
         assert!(!suffixed_path(&prefix, other_suffix).exists());
         fs::remove_file(input).unwrap();
+    }
+}
+
+#[test]
+fn process_validates_config_before_creating_or_truncating_outputs() {
+    let cases: &[(&[&str], &str, i32)] = &[
+        (
+            &["--moving-window-length-ms", "1000", "--output-value-unit-ratio", "0"],
+            "output value unit ratio",
+            1,
+        ),
+        (
+            &["--moving-window-length-ms", "1000", "--percentiles-output-ticks-per-half", "0"],
+            "invalid value '0'",
+            2,
+        ),
+        (
+            &[
+                "--moving-window-length-ms",
+                "1000",
+                "--correct-log-with-known-coordinated-omission",
+                "NaN",
+            ],
+            "coordinated-omission interval",
+            1,
+        ),
+        (&["--moving-window-percentile", "101"], "moving-window percentile", 1),
+        (&["--moving-window-length-ms", "0"], "moving-window length", 1),
+    ];
+
+    for &(invalid_args, message, exit_code) in cases {
+        for existing in [false, true] {
+            let prefix = temp_output_prefix("invalid-report-config");
+            let paths = [prefix.clone(), suffixed_path(&prefix, "hgrm"), suffixed_path(&prefix, "mwp")];
+            if existing {
+                for path in &paths {
+                    fs::write(path, "existing report").unwrap();
+                }
+            }
+
+            let mut args = vec!["log", "process", "--output", prefix.to_str().unwrap()];
+            args.extend_from_slice(invalid_args);
+            let output = run_with_stdin(&args, "");
+            assert_eq!(Some(exit_code), output.status.code());
+            assert!(String::from_utf8_lossy(&output.stderr).contains(message));
+            for path in &paths {
+                if existing {
+                    assert_eq!("existing report", fs::read_to_string(path).unwrap());
+                    fs::remove_file(path).unwrap();
+                } else {
+                    assert!(!path.exists(), "invalid config created {}", path.display());
+                }
+            }
+        }
     }
 }
 
@@ -306,6 +397,16 @@ fn process_command_writes_percentile_distribution_to_stdout() {
     assert!(stdout.starts_with("#[StartTime: 10.000"));
     assert!(stdout.contains("\"Value\",\"Percentile\",\"TotalCount\""));
     assert!(stdout.contains(",3,"));
+}
+
+#[test]
+fn process_stops_at_range_end_before_malformed_tail() {
+    let log = format!("{}Tag=other,11,1,0,not-base64\nmalformed discarded tail\n", sample_log());
+    for args in [&["log", "process", "--csv", "--end", "0"][..], &["-csv", "-end", "0"][..]] {
+        let output = run_with_stdin(args, &log);
+        assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(",3,"));
+    }
 }
 
 #[test]

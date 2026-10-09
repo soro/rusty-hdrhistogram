@@ -44,9 +44,9 @@ fn frozen_double_snapshot_supports_overlapping_reads_and_next_interval_writers()
             let another_snapshot = sample.snapshot();
             let view = snapshot.read_view();
             let all = snapshot.all_values();
-            let linear = snapshot.linear_bucket_values(1_024.0);
+            let linear = snapshot.linear_bucket_values(1_024.0).unwrap();
             let logarithmic = snapshot.logarithmic_bucket_values(1.0, 2.0).unwrap();
-            let percentiles = snapshot.percentiles(2);
+            let percentiles = snapshot.percentiles(std::num::NonZeroU32::new(2).unwrap());
 
             assert_eq!(reference.get_max_value(), snapshot.get_max_value());
             assert_eq!(reference.get_min_value(), snapshot.get_min_value());

@@ -1057,7 +1057,7 @@ fn value_at_percentile_matches_percentile_iter() {
             succ!(histogram.record_value(value));
         }
 
-        let percentile_ticks_per_half_distance = 1000;
+        let percentile_ticks_per_half_distance = std::num::NonZeroU32::new(1000).unwrap();
         for v in histogram.percentiles(percentile_ticks_per_half_distance) {
             let calculated_value = histogram.get_value_at_percentile(v.percentile);
             let iter_value = v.value_iterated_to;

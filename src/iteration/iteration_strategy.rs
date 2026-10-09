@@ -1,5 +1,6 @@
 use crate::core::ReadableHistogram;
 use crate::iteration::iteration_state::IterationState;
+use std::num::NonZeroU32;
 
 pub trait IterationStrategy<T: ReadableHistogram>: Sized {
     fn reached_iteration_level(&mut self, state: &IterationState, histogram: &T) -> bool;
@@ -108,7 +109,7 @@ impl<T: ReadableHistogram> IterationStrategy<T> for LogarithmicStrategy {
 }
 
 pub struct PercentileStrategy {
-    pub(in crate::iteration) percentile_ticks_per_half_distance: isize,
+    pub(in crate::iteration) percentile_ticks_per_half_distance: NonZeroU32,
     pub(in crate::iteration) percentile_level_to_iterate_to: f64,
     pub(in crate::iteration) percentile_level_to_iterate_from: f64,
     pub(in crate::iteration) reached_last_recorded_value: bool,
@@ -135,13 +136,9 @@ impl<T: ReadableHistogram> IterationStrategy<T> for PercentileStrategy {
             exp as u32
         };
         let factor = 1_u64 << exp;
-        let ticks_per_half = self.percentile_ticks_per_half_distance as u64;
+        let ticks_per_half = u64::from(self.percentile_ticks_per_half_distance.get());
         let percentile_reporting_ticks = ticks_per_half.saturating_mul(factor);
-        if percentile_reporting_ticks == 0 {
-            self.percentile_level_to_iterate_to = 100.0;
-        } else {
-            self.percentile_level_to_iterate_to += 100.0 / percentile_reporting_ticks as f64;
-        }
+        self.percentile_level_to_iterate_to += 100.0 / percentile_reporting_ticks as f64;
     }
 
     fn has_next(&mut self, state: &IterationState, _: &T) -> bool {
